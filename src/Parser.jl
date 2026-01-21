@@ -3,7 +3,7 @@ module Parser
 using ..Types
 using ..Operations
 
-export parse_latex_and_execute
+export parse_latex_and_execute, expand_latex
 
 """
     parse_idx_string(s::String)
@@ -56,7 +56,9 @@ Basic parser flow:
 """
 function parse_latex_and_execute(tensor_map::Dict{String, Tensor}, expression::String)
     # 1. Cleaning: remove '\'
+    # 1. Cleaning: remove '\' and '\,' (LaTeX space)
     clean_expr = replace(expression, "\\" => "")
+    clean_expr = replace(clean_expr, "," => "") 
     
     # 2. Split by ';' to get factors
     # e.g. "T^{a}_{b} ; T^{b}_{c}" -> ["T^{a}_{b}", " T^{b}_{c}"]
@@ -246,3 +248,125 @@ end
 
 
 end # module Parser
+
+"""
+    expand_latex(tensor_map::Dict{String, Tensor}, expression::String, dimension::Int)
+
+Generates a symbolic expansion string for the given expression.
+Example: "{T^{1}_{1} ; J^{1} + T^{1}_{2} ; J^{2} + ...}[a]"
+"""
+function expand_latex(tensor_map::Dict{String, Tensor}, expression::String, dimension::Int)
+    # 1. Clean expression
+    clean_expr = replace(expression, "\\" => "")
+    clean_expr = replace(clean_expr, "," => "") # Remove thin spaces \, if user typed \, as , ? No, \, in latex is space.
+    # User input "\T^{a}\,_{b}" -> clean_expr will have \, ?
+    # Let's simple remove non-alphanumeric/caret/underscore/curly
+    # Actually just remove whitespace and commas
+    clean_expr = replace(clean_expr, r"\s+" => "")
+    
+    # 2. Parse factors
+    factors_str = split(clean_expr, ";")
+    
+    factors = []
+    all_indices = []
+    
+    for factor in factors_str
+        m = match(r"^([a-zA-Z0-9]+)(.*)$", factor)
+        if m === nothing
+             continue 
+        end
+        name = m.captures[1]
+        idx_str = m.captures[2]
+        
+        parsed_indices = parse_idx_string(idx_str)
+        push!(factors, (name, parsed_indices))
+        append!(all_indices, parsed_indices)
+    end
+    
+    # 3. Identify Dummy and Free indices
+    # Frequency count
+    idx_counts = Dict{String, Int}()
+    for (idx_name, pos) in all_indices
+        idx_counts[idx_name] = get(idx_counts, idx_name, 0) + 1
+    end
+    
+    dummy_indices = [k for (k,v) in idx_counts if v == 2] # Exactly 2 occurences logic
+    free_indices = [k for (k,v) in idx_counts if v == 1]
+    
+    # Sort free indices to determine result order (naive: alphabetical)
+    sort!(free_indices)
+    
+    # 4. Generate Expansion String
+    # Format: "{ Term1 + Term2 + ... }[free_indices]"
+    
+    # We construct the first component (free indices = 1)
+    # Then iterate dummy indices.
+    
+    terms = []
+    
+    # Recursive loop for dummy indices?
+    # Simple case: 1 dummy index loop.
+    # If multiple, we need CartesianProduct.
+    
+    # Generate ranges for dummies
+    dummy_names = sort(dummy_indices)
+    iterators = [1:dimension for _ in dummy_names]
+    
+    import Base.Iterators
+    
+    # We iterate over all combinations of dummy indices values
+    for vals in Iterators.product(iterators...)
+        # vals is a tuple of values corresponding to dummy_names
+        
+        # Build map for this term: IndexName -> Value
+        # Free indices fixed to 1 (for the first component display)
+        val_map = Dict{String, Int}()
+        result_prefix_map = Dict{String, Int}()
+        
+        for idx in free_indices
+            val_map[idx] = 1 # Show first component
+            result_prefix_map[idx] = 1
+        end
+        
+        for (i, dname) in enumerate(dummy_names)
+            val_map[dname] = vals[i]
+        end
+        
+        # Construct Term String: "T^{1}_{val} ; J^{val}"
+        term_parts = []
+        for (name, indices) in factors
+            # Reconstruct indices part
+            # T^{val}_{val}
+            p_str = name
+            for (idx_name, pos) in indices
+                val = val_map[idx_name]
+                if pos == :up
+                    p_str *= "^{$val}"
+                else
+                    p_str *= "_{$val}"
+                end
+            end
+            push!(term_parts, p_str)
+        end
+        
+        term_str = join(term_parts, " ; ")
+        push!(terms, term_str)
+    end
+    
+    inner_str = join(terms, " + ")
+    
+    # Suffix
+    suffix = ""
+    if !isEmpty(free_indices)
+        suffix = "[" * join(free_indices, ",") * "]"
+        
+        # Add "1->2" hint if free indices exist?
+        # User requested: "{..., 1->2, ...}[a]"
+        if dimension > 1
+             inner_str *= ", 1->2, ..., 1->$dimension"
+        end
+    end
+    
+    return "{" * inner_str * "}" * suffix
+end
+

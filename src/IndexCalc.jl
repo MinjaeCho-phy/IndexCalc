@@ -11,6 +11,6 @@ using .Parser
 
 export Metric, Tensor
 export raise_index, lower_index
-export parse_latex_and_execute
+export parse_latex_and_execute, expand_latex
 
 end # module IndexCalc

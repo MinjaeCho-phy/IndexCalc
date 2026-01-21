@@ -53,5 +53,30 @@ using LinearAlgebra
     # This is complex, but let's see if partial works.
     # Let's try matching indices locally.
     
+
+    # 7. Symbolic Expansion
+    # \T^{a}\,_{b} ; \J^{b} (a free, b dummy)
+    # Dimension 4
+    
+    # Define J tensor for the map
+    data_J = [1.0, 2.0, 3.0, 4.0]
+    J = Tensor(data_J, "J", "+", g)
+    
+    tensor_map["J"] = J
+    
+    expr = "\\T^{a}\\,_{b} ; \\J^{b}"
+    expanded = expand_latex(tensor_map, expr, 4)
+    
+    # Check format: "{ T^{1}_{1} ; J^{1} + ... + T^{1}_{4} ; J^{4}, 1->2, ..., 1->4 }[a]"
+    # Note: Our code cleans \, and spaces. Factors order preserved.
+    # Expected core: "T^{1}_{1} ; J^{1} + T^{1}_{2} ; J^{2} + T^{1}_{3} ; J^{3} + T^{1}_{4} ; J^{4}"
+    
+    println("Expanded: ", expanded)
+    
+    @test contains(expanded, "T^{1}_{1} ; J^{1}")
+    @test contains(expanded, "T^{1}_{4} ; J^{4}")
+    @test contains(expanded, ", 1->2, ..., 1->4")
+    @test endswith(expanded, "[a]")
+    
     # Test passed if code compiles and runs logic correctly.
 end
