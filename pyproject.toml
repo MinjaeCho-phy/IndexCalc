@@ -1,0 +1,16 @@
+[project]
+name = "indexcalc"
+version = "0.1.0"
+description = "Symbolic tensor index calculus with JAX backend"
+requires-python = ">=3.10"
+dependencies = [
+    "jax",
+    "jaxlib",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ipython"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
