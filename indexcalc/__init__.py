@@ -13,6 +13,8 @@ from indexcalc.core.deriv import (
     CovariantDeriv, covariant, expand_covariant,
 )
 from indexcalc.evaluate.component import evaluate
+from indexcalc.coordinates import Coordinates, parse_signature
+from indexcalc.curvature import Metric, CurvatureResult
 from indexcalc.parse.latex import IndexRegistry, parse
 from indexcalc.parse.display import to_latex
 
@@ -27,6 +29,8 @@ __all__ = [
     "Connection", "LeviCivitaConnection",
     "CovariantDeriv", "covariant", "expand_covariant",
     "evaluate",
+    "Coordinates", "parse_signature",
+    "Metric", "CurvatureResult",
     "IndexRegistry", "parse",
     "to_latex",
 ]
