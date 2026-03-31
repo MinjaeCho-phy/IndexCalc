@@ -28,6 +28,12 @@ import numpy as _np
 from indexcalc.coordinates import Coordinates, parse_signature
 
 
+def _latex_align(equations: list[str]) -> str:
+    """LaTeX aligned 블록 생성."""
+    body = r" \\ ".join(equations)
+    return rf"\begin{{aligned}} {body} \end{{aligned}}"
+
+
 # ─── Metric ──────────────────────────────────────────────────
 
 class Metric:
@@ -562,13 +568,115 @@ class SymbolicCurvatureResult:
             f"K = {sp.simplify(self.kretschner)}"
         )
 
-    def show(self, tensor: str = "christoffel", output: str = "text") -> str:
-        """곡률 텐서의 비영 성분을 좌표 이름으로 출력한다.
+    # ── LaTeX 좌표 이름 매핑 ──
+    _LATEX_NAMES = {
+        "t": "t", "r": "r", "x": "x", "y": "y", "z": "z", "w": "w",
+        "θ": r"\theta", "theta": r"\theta",
+        "φ": r"\varphi", "phi": r"\varphi",
+        "ρ": r"\rho", "rho": r"\rho",
+        "ψ": r"\psi", "psi": r"\psi",
+    }
+
+    def _latex_name(self, name: str) -> str:
+        """좌표 이름을 LaTeX로 변환."""
+        return self._LATEX_NAMES.get(name, name)
+
+    def latex(self, tensor: str = "christoffel") -> str:
+        """곡률 텐서의 비영 성분을 LaTeX 수식으로 반환한다.
 
         Parameters
         ----------
         tensor : str
-            "christoffel", "riemann", "ricci", "einstein" 중 하나.
+            "christoffel", "riemann", "ricci", "einstein",
+            "ricci_scalar", "kretschner", "metric" 중 하나.
+
+        Returns
+        -------
+        str
+            LaTeX aligned equation block.
+        """
+        import sympy as sp
+
+        names = [self._latex_name(n) for n in self.coords_names]
+        dim = len(names)
+        eqs = []
+
+        if tensor == "ricci_scalar":
+            return f"R = {sp.latex(sp.simplify(self.ricci_scalar))}"
+
+        if tensor == "kretschner":
+            return f"K = {sp.latex(sp.simplify(self.kretschner))}"
+
+        if tensor == "metric":
+            for m in range(dim):
+                for n in range(m, dim):
+                    val = sp.simplify(self.metric[m, n])
+                    if val != 0:
+                        eqs.append(
+                            f"g_{{{names[m]}{names[n]}}} &= {sp.latex(val)}"
+                        )
+            return _latex_align(eqs) if eqs else r"\text{(zero metric)}"
+
+        if tensor == "christoffel":
+            arr = self.christoffel
+            for s in range(dim):
+                for m in range(dim):
+                    for n in range(m, dim):
+                        val = sp.simplify(arr[s, m, n])
+                        if val != 0:
+                            eqs.append(
+                                rf"\Gamma^{{{names[s]}}}_{{{names[m]}{names[n]}}} "
+                                rf"&= {sp.latex(val)}"
+                            )
+
+        elif tensor == "riemann":
+            arr = self.riemann
+            for r in range(dim):
+                for s in range(dim):
+                    for m in range(dim):
+                        for n in range(m + 1, dim):
+                            val = sp.simplify(arr[r, s, m, n])
+                            if val != 0:
+                                eqs.append(
+                                    rf"R^{{{names[r]}}}_{{{names[s]}{names[m]}{names[n]}}} "
+                                    rf"&= {sp.latex(val)}"
+                                )
+
+        elif tensor == "ricci":
+            arr = self.ricci_tensor
+            for m in range(dim):
+                for n in range(m, dim):
+                    val = sp.simplify(arr[m, n])
+                    if val != 0:
+                        eqs.append(
+                            rf"R_{{{names[m]}{names[n]}}} &= {sp.latex(val)}"
+                        )
+
+        elif tensor == "einstein":
+            arr = self.einstein_tensor
+            for m in range(dim):
+                for n in range(m, dim):
+                    val = sp.simplify(arr[m, n])
+                    if val != 0:
+                        eqs.append(
+                            rf"G_{{{names[m]}{names[n]}}} &= {sp.latex(val)}"
+                        )
+
+        else:
+            raise ValueError(
+                f"Unknown tensor '{tensor}'. Use 'christoffel', 'riemann', "
+                f"'ricci', 'einstein', 'ricci_scalar', 'kretschner', or 'metric'."
+            )
+
+        return _latex_align(eqs) if eqs else r"\text{(all components zero)}"
+
+    def show(self, tensor: str = "christoffel", output: str = "text") -> str:
+        """곡률 텐서의 비영 성분을 출력한다.
+
+        Parameters
+        ----------
+        tensor : str
+            "christoffel", "riemann", "ricci", "einstein" 등.
         output : str
             "text" 또는 "latex".
 
@@ -576,17 +684,25 @@ class SymbolicCurvatureResult:
         -------
         str
         """
-        import sympy as sp
+        if output == "latex":
+            result = self.latex(tensor)
+            # Jupyter에서 display 시도
+            try:
+                from IPython.display import display, Math
+                display(Math(result))
+            except ImportError:
+                print(result)
+            return result
 
+        # text 모드
+        import sympy as sp
         names = self.coords_names
         dim = len(names)
         lines = []
 
         def _fmt(val):
             val = sp.simplify(val)
-            if val == 0:
-                return None
-            return sp.latex(val) if output == "latex" else str(val)
+            return None if val == 0 else str(val)
 
         if tensor == "christoffel":
             arr = self.christoffel
@@ -636,6 +752,14 @@ class SymbolicCurvatureResult:
         result = "\n".join(lines) if lines else "  (all components zero)"
         print(result)
         return result
+
+    # ── Jupyter repr ──
+    def _repr_latex_(self) -> str:
+        """Jupyter에서 자동 LaTeX 렌더링."""
+        import sympy as sp
+        R_latex = sp.latex(sp.simplify(self.ricci_scalar))
+        K_latex = sp.latex(sp.simplify(self.kretschner))
+        return rf"$R = {R_latex}, \quad K = {K_latex}$"
 
 
 class _SymbolicCurvatureComputer:
