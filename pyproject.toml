@@ -9,7 +9,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "ipython"]
+symbolic = ["sympy>=1.12"]
+dev = ["pytest", "ipython", "sympy>=1.12"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

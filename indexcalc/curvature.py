@@ -67,12 +67,26 @@ class Metric:
 
     def __init__(
         self,
-        func: Callable,
+        func,
         coords: list[str] | str | Coordinates,
         signature: tuple | None = None,
         dim: int | None = None,
     ):
         self.func = func
+
+        # ── SymPy Matrix 감지 ──
+        self._is_symbolic = False
+        self._sympy_metric = None
+        try:
+            import sympy as sp
+            if isinstance(func, sp.MatrixBase):
+                self._is_symbolic = True
+                self._sympy_metric = func
+                # dim을 matrix에서 추론
+                if dim is None:
+                    dim = func.shape[0]
+        except ImportError:
+            pass
 
         # ── 좌표계 해석 ──
         if isinstance(coords, Coordinates):
@@ -99,8 +113,11 @@ class Metric:
         # ── Signature ──
         self._signs = parse_signature(signature, self._coords.dim)
 
-        # ── 내부 curvature computer ──
-        self._computer = _CurvatureComputer(func, self._coords.dim)
+        # ── 내부 curvature computer (numeric only) ──
+        if not self._is_symbolic:
+            self._computer = _CurvatureComputer(func, self._coords.dim)
+        else:
+            self._computer = None
 
     @property
     def coords(self) -> Coordinates:
@@ -114,19 +131,89 @@ class Metric:
     def signature(self) -> tuple[int, ...]:
         return self._signs
 
-    def at(self, x) -> CurvatureResult:
-        """주어진 좌표에서 모든 곡률 텐서를 계산한다.
+    def at(self, x, params: dict | None = None) -> CurvatureResult:
+        """주어진 좌표에서 모든 곡률 텐서를 수치 계산한다.
 
         Parameters
         ----------
         x : array-like
             좌표 벡터, shape (dim,).
+        params : dict or None
+            SymPy metric일 때 매개변수 값.  e.g., {M: 1.0, H: 0.5}.
+            callable metric이면 무시된다.
 
         Returns
         -------
         CurvatureResult
         """
+        if self._is_symbolic:
+            return self._at_from_sympy(x, params)
         return self._computer.at(x, self._coords)
+
+    def symbolic(self, coord_symbols: list | None = None) -> SymbolicCurvatureResult:
+        """모든 곡률 텐서를 symbolic으로 계산한다.
+
+        Parameters
+        ----------
+        coord_symbols : list of sympy.Symbol
+            좌표 심볼.  e.g., [t, r, θ, φ].
+
+        Returns
+        -------
+        SymbolicCurvatureResult
+        """
+        if not self._is_symbolic:
+            raise TypeError(
+                "symbolic()은 SymPy Matrix로 생성된 Metric에서만 사용 가능합니다. "
+                "수치 계산은 .at(x)를 사용하세요."
+            )
+        if coord_symbols is None:
+            raise ValueError(
+                "coord_symbols를 지정해야 합니다.  e.g., g.symbolic([t, r, θ, φ])"
+            )
+        if len(coord_symbols) != self.dim:
+            raise ValueError(
+                f"coord_symbols 길이 {len(coord_symbols)} ≠ dim {self.dim}"
+            )
+
+        computer = _SymbolicCurvatureComputer(
+            self._sympy_metric, coord_symbols, self.dim
+        )
+        return computer.compute(self._coords)
+
+    def _at_from_sympy(self, x, params: dict | None) -> CurvatureResult:
+        """SymPy metric을 lambdify하여 수치 계산."""
+        import sympy as sp
+        import jax
+        import jax.numpy as jnp
+
+        jax.config.update("jax_enable_x64", True)
+
+        # metric의 free symbols에서 좌표 심볼 추출
+        free = self._sympy_metric.free_symbols
+        # params에서 좌표가 아닌 매개변수 대입
+        g_substituted = self._sympy_metric
+        if params:
+            g_substituted = g_substituted.subs(params)
+
+        # 남은 free symbols를 좌표로 간주
+        coord_syms = sorted(g_substituted.free_symbols, key=lambda s: str(s))
+        if len(coord_syms) != self.dim:
+            raise ValueError(
+                f"대입 후 남은 심볼 {coord_syms}의 수가 dim={self.dim}과 다릅니다. "
+                f"params로 매개변수를 지정하세요."
+            )
+
+        # lambdify → JAX 함수
+        g_func = sp.lambdify(
+            [coord_syms], g_substituted, modules=["numpy"]
+        )
+
+        def metric_func(coords):
+            return jnp.array(g_func(coords), dtype=jnp.float64)
+
+        computer = _CurvatureComputer(metric_func, self.dim)
+        return computer.at(x, self._coords)
 
     def __repr__(self) -> str:
         sig_str = "".join("−" if s == -1 else "+" for s in self._signs)
@@ -381,3 +468,325 @@ class _CurvatureComputer:
         term4 = jnp.einsum('rnl,lms->rsmn', gamma, gamma)
 
         return term1 - term2 + term3 - term4
+
+
+# ─── Symbolic compute engine ─────────────────────────────────
+
+class SymbolicCurvatureResult:
+    """Symbolic 곡률 텐서 계산 결과.
+
+    모든 성분이 SymPy 수식으로 표현된다.
+    .subs()로 값을 대입하여 수치 결과를 얻을 수 있다.
+
+    Attributes
+    ----------
+    metric : sp.Matrix
+        g_{μν}.
+    inverse_metric : sp.Matrix
+        g^{μν}.
+    christoffel : sp.Array
+        Γ^σ_{μν}. 축: (σ, μ, ν).
+    riemann : sp.Array
+        R^ρ_{σμν}. 축: (ρ, σ, μ, ν).
+    ricci_tensor : sp.Matrix
+        R_{μν}.
+    ricci_scalar : sp.Expr
+        R = g^{μν} R_{μν}.
+    einstein_tensor : sp.Matrix
+        G_{μν} = R_{μν} - ½ g_{μν} R.
+    kretschner : sp.Expr
+        K = R_{ρσμν} R^{ρσμν}.
+    coord_symbols : list[sp.Symbol]
+        좌표 SymPy 심볼.
+    coords_names : tuple[str, ...]
+        좌표 이름.
+    """
+
+    def __init__(
+        self,
+        metric,
+        inverse_metric,
+        christoffel,
+        riemann,
+        ricci_tensor,
+        ricci_scalar,
+        einstein_tensor,
+        kretschner,
+        coord_symbols,
+        coords_names,
+    ):
+        self.metric = metric
+        self.inverse_metric = inverse_metric
+        self.christoffel = christoffel
+        self.riemann = riemann
+        self.ricci_tensor = ricci_tensor
+        self.ricci_scalar = ricci_scalar
+        self.einstein_tensor = einstein_tensor
+        self.kretschner = kretschner
+        self.coord_symbols = coord_symbols
+        self.coords_names = coords_names
+
+    # ── 별칭 ──
+    @property
+    def g(self):
+        return self.metric
+
+    @property
+    def g_inv(self):
+        return self.inverse_metric
+
+    @property
+    def Γ(self):
+        return self.christoffel
+
+    @property
+    def R(self):
+        return self.ricci_scalar
+
+    @property
+    def Ric(self):
+        return self.ricci_tensor
+
+    @property
+    def G(self):
+        return self.einstein_tensor
+
+    @property
+    def K(self):
+        return self.kretschner
+
+    def summary(self) -> str:
+        import sympy as sp
+        return (
+            f"R = {sp.simplify(self.ricci_scalar)}, "
+            f"K = {sp.simplify(self.kretschner)}"
+        )
+
+    def show(self, tensor: str = "christoffel", output: str = "text") -> str:
+        """곡률 텐서의 비영 성분을 좌표 이름으로 출력한다.
+
+        Parameters
+        ----------
+        tensor : str
+            "christoffel", "riemann", "ricci", "einstein" 중 하나.
+        output : str
+            "text" 또는 "latex".
+
+        Returns
+        -------
+        str
+        """
+        import sympy as sp
+
+        names = self.coords_names
+        dim = len(names)
+        lines = []
+
+        def _fmt(val):
+            val = sp.simplify(val)
+            if val == 0:
+                return None
+            return sp.latex(val) if output == "latex" else str(val)
+
+        if tensor == "christoffel":
+            arr = self.christoffel
+            for s in range(dim):
+                for m in range(dim):
+                    for n in range(m, dim):
+                        v = _fmt(arr[s, m, n])
+                        if v is not None:
+                            lines.append(
+                                f"  Γ^{names[s]}_{{{names[m]}{names[n]}}} = {v}"
+                            )
+
+        elif tensor == "riemann":
+            arr = self.riemann
+            for r in range(dim):
+                for s in range(dim):
+                    for m in range(dim):
+                        for n in range(m + 1, dim):
+                            v = _fmt(arr[r, s, m, n])
+                            if v is not None:
+                                lines.append(
+                                    f"  R^{names[r]}_{{{names[s]}{names[m]}{names[n]}}} = {v}"
+                                )
+
+        elif tensor == "ricci":
+            arr = self.ricci_tensor
+            for m in range(dim):
+                for n in range(m, dim):
+                    v = _fmt(arr[m, n])
+                    if v is not None:
+                        lines.append(f"  R_{{{names[m]}{names[n]}}} = {v}")
+
+        elif tensor == "einstein":
+            arr = self.einstein_tensor
+            for m in range(dim):
+                for n in range(m, dim):
+                    v = _fmt(arr[m, n])
+                    if v is not None:
+                        lines.append(f"  G_{{{names[m]}{names[n]}}} = {v}")
+
+        else:
+            raise ValueError(
+                f"Unknown tensor '{tensor}'. "
+                f"Use 'christoffel', 'riemann', 'ricci', or 'einstein'."
+            )
+
+        result = "\n".join(lines) if lines else "  (all components zero)"
+        print(result)
+        return result
+
+
+class _SymbolicCurvatureComputer:
+    """SymPy 기반 symbolic 곡률 계산 엔진."""
+
+    def __init__(self, g_matrix, coord_symbols, dim: int):
+        import sympy as sp
+        self.g = g_matrix
+        self.g_inv = g_matrix.inv()
+        self.x = coord_symbols
+        self.dim = dim
+        self.sp = sp
+
+    def compute(self, coord_obj: Coordinates) -> SymbolicCurvatureResult:
+        sp = self.sp
+        dim = self.dim
+
+        gamma = self._christoffel()
+        riem = self._riemann(gamma)
+        ricci = self._ricci(riem)
+        R = self._ricci_scalar(ricci)
+        einstein = self._einstein(ricci, R)
+        kretschner = self._kretschner(riem)
+
+        return SymbolicCurvatureResult(
+            metric=self.g,
+            inverse_metric=self.g_inv,
+            christoffel=gamma,
+            riemann=riem,
+            ricci_tensor=ricci,
+            ricci_scalar=R,
+            einstein_tensor=einstein,
+            kretschner=kretschner,
+            coord_symbols=self.x,
+            coords_names=coord_obj.names,
+        )
+
+    def _christoffel(self):
+        """Γ^σ_{μν} = ½ g^{σρ}(g_{ρμ,ν} + g_{ρν,μ} - g_{μν,ρ})."""
+        sp = self.sp
+        dim, g, g_inv, x = self.dim, self.g, self.g_inv, self.x
+
+        gamma = sp.MutableDenseNDimArray.zeros(dim, dim, dim)
+        for s in range(dim):
+            for m in range(dim):
+                for n in range(m, dim):  # 대칭: Γ^s_{mn} = Γ^s_{nm}
+                    val = sp.Rational(0)
+                    for r in range(dim):
+                        val += g_inv[s, r] * (
+                            sp.diff(g[r, m], x[n])
+                            + sp.diff(g[r, n], x[m])
+                            - sp.diff(g[m, n], x[r])
+                        )
+                    val = sp.simplify(sp.Rational(1, 2) * val)
+                    gamma[s, m, n] = val
+                    gamma[s, n, m] = val  # 대칭
+        return gamma
+
+    def _riemann(self, gamma):
+        """R^ρ_{σμν} = ∂_μ Γ^ρ_{νσ} − ∂_ν Γ^ρ_{μσ} + Γ^ρ_{μλ}Γ^λ_{νσ} − Γ^ρ_{νλ}Γ^λ_{μσ}."""
+        sp = self.sp
+        dim, x = self.dim, self.x
+
+        riem = sp.MutableDenseNDimArray.zeros(dim, dim, dim, dim)
+        for rho in range(dim):
+            for sig in range(dim):
+                for mu in range(dim):
+                    for nu in range(mu + 1, dim):  # 반대칭: R^ρ_{σμν} = -R^ρ_{σνμ}
+                        val = (
+                            sp.diff(gamma[rho, nu, sig], x[mu])
+                            - sp.diff(gamma[rho, mu, sig], x[nu])
+                        )
+                        for lam in range(dim):
+                            val += (
+                                gamma[rho, mu, lam] * gamma[lam, nu, sig]
+                                - gamma[rho, nu, lam] * gamma[lam, mu, sig]
+                            )
+                        val = sp.simplify(val)
+                        riem[rho, sig, mu, nu] = val
+                        riem[rho, sig, nu, mu] = -val  # 반대칭
+        return riem
+
+    def _ricci(self, riem):
+        """R_{σν} = R^μ_{σμν} (첫째-셋째 인덱스 축약)."""
+        sp = self.sp
+        dim = self.dim
+
+        ricci = sp.zeros(dim, dim)
+        for s in range(dim):
+            for n in range(s, dim):  # 대칭: R_{sn} = R_{ns}
+                val = sum(riem[m, s, m, n] for m in range(dim))
+                val = sp.simplify(val)
+                ricci[s, n] = val
+                ricci[n, s] = val
+        return ricci
+
+    def _ricci_scalar(self, ricci):
+        """R = g^{μν} R_{μν}."""
+        sp = self.sp
+        dim, g_inv = self.dim, self.g_inv
+
+        val = sum(
+            g_inv[m, n] * ricci[m, n]
+            for m in range(dim)
+            for n in range(dim)
+        )
+        return sp.simplify(val)
+
+    def _einstein(self, ricci, R):
+        """G_{μν} = R_{μν} - ½ g_{μν} R."""
+        sp = self.sp
+        dim, g = self.dim, self.g
+
+        einstein = sp.zeros(dim, dim)
+        for m in range(dim):
+            for n in range(m, dim):
+                val = sp.simplify(ricci[m, n] - sp.Rational(1, 2) * g[m, n] * R)
+                einstein[m, n] = val
+                einstein[n, m] = val
+        return einstein
+
+    def _kretschner(self, riem):
+        """K = R_{ρσμν} R^{ρσμν}."""
+        sp = self.sp
+        dim, g, g_inv = self.dim, self.g, self.g_inv
+
+        # R_{ρσμν} = g_{ρα} R^α_{σμν}
+        # R^{ρσμν} = g^{ρα} g^{σβ} g^{μγ} g^{νδ} R_{αβγδ}
+        # K = Σ R_{ρσμν} R^{ρσμν}
+        #   = Σ g_{ρα} R^α_{σμν} · g^{ρβ} g^{σγ} g^{μδ} g^{νε} g_{βφ} R^φ_{γδε}
+        # 더 간단하게: K = Σ R^a_{bcd} R^e_{fgh} g_{ae} g^{bf} g^{cg} g^{dh}
+        val = sp.Rational(0)
+        for a in range(dim):
+            for b in range(dim):
+                for c in range(dim):
+                    for d in range(c + 1, dim):  # 반대칭 이용: *2
+                        if riem[a, b, c, d] == 0:
+                            continue
+                        for e in range(dim):
+                            for f in range(dim):
+                                for h in range(dim):  # g, h → 반대칭
+                                    r_up = sum(
+                                        g_inv[c, gg] * g_inv[d, h]
+                                        * riem[e, f, gg, h]
+                                        for gg in range(dim)
+                                    )
+                                    if r_up == 0:
+                                        continue
+                                    val += (
+                                        g[a, e] * g_inv[b, f]
+                                        * riem[a, b, c, d] * r_up
+                                    )
+        val = 2 * val  # 반대칭 (c,d) 보정
+        return sp.simplify(val)
