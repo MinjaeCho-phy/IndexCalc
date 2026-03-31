@@ -15,6 +15,7 @@ from indexcalc.core.deriv import (
 from indexcalc.evaluate.component import evaluate
 from indexcalc.coordinates import Coordinates, parse_signature
 from indexcalc.curvature import Metric, CurvatureResult, SymbolicCurvatureResult
+from indexcalc.transform import CoordinateTransform
 from indexcalc.parse.latex import IndexRegistry, parse
 from indexcalc.parse.display import to_latex
 
@@ -31,6 +32,7 @@ __all__ = [
     "evaluate",
     "Coordinates", "parse_signature",
     "Metric", "CurvatureResult", "SymbolicCurvatureResult",
+    "CoordinateTransform",
     "IndexRegistry", "parse",
     "to_latex",
 ]
