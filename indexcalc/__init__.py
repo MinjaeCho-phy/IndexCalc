@@ -12,6 +12,13 @@ from indexcalc.core.deriv import (
     Connection, LeviCivitaConnection,
     CovariantDeriv, covariant, expand_covariant,
 )
+from indexcalc.core.spatial_deriv import (
+    SpatialCovariantDeriv, spatial_covariant, expand_spatial_covariant,
+)
+from indexcalc.core.variation import (
+    Variation, ZeroTensor, VariationRegistry, expand_variation,
+)
+from indexcalc.core.symmetry import canonicalize_antisym
 from indexcalc.evaluate.component import evaluate
 from indexcalc.coordinates import Coordinates, parse_signature
 from indexcalc.curvature import Metric, CurvatureResult, SymbolicCurvatureResult
@@ -29,6 +36,9 @@ __all__ = [
     "PartialDeriv", "partial", "expand_partial",
     "Connection", "LeviCivitaConnection",
     "CovariantDeriv", "covariant", "expand_covariant",
+    "SpatialCovariantDeriv", "spatial_covariant", "expand_spatial_covariant",
+    "Variation", "ZeroTensor", "VariationRegistry", "expand_variation",
+    "canonicalize_antisym",
     "evaluate",
     "Coordinates", "parse_signature",
     "Metric", "CurvatureResult", "SymbolicCurvatureResult",

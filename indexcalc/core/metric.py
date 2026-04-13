@@ -96,12 +96,29 @@ def _generate_dummy(space: IndexSpace, existing: set[str], position: str) -> Ind
     Index
         충돌 없는 새 dummy index.
     """
-    base = space.indices[0] if space.indices else "i"
+    base = _first_grapheme(space.indices) if space.indices else "i"
     counter = 1
     while f"{base}_{counter}" in existing:
         counter += 1
     name = f"{base}_{counter}"
     return Index(name, space, position)
+
+
+def _first_grapheme(text: str) -> str:
+    """Return the first base character plus its trailing combining marks.
+
+    "p̄qr" → "p̄",  "abc" → "a",  "" → "".
+    Mirrors parse.latex._iter_graphemes without importing it (keeps metric
+    module free of parser dependencies).
+    """
+    if not text:
+        return ""
+    ch = text[0]
+    i = 1
+    while i < len(text) and 0x0300 <= ord(text[i]) <= 0x036F:
+        ch += text[i]
+        i += 1
+    return ch
 
 
 def _collect_existing_names(expr: TensorExpr) -> set[str]:

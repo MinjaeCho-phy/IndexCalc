@@ -391,8 +391,20 @@ def _collect_existing_names_deriv(expr: TensorExpr) -> set[str]:
 
 
 def _make_dummy(space: IndexSpace, existing: set[str]) -> str:
-    """충돌 없는 dummy index 이름을 생성한다."""
-    base = space.indices[0] if space.indices else "i"
+    """충돌 없는 dummy index 이름을 생성한다.
+
+    Uses the first grapheme (base char + trailing combining marks) of
+    ``space.indices`` so decorated index alphabets like "p̄q̄r̄s̄" resolve
+    correctly instead of slicing off the combining mark.
+    """
+    if space.indices:
+        base = space.indices[0]
+        i = 1
+        while i < len(space.indices) and 0x0300 <= ord(space.indices[i]) <= 0x036F:
+            base += space.indices[i]
+            i += 1
+    else:
+        base = "i"
     counter = 1
     while f"{base}_{counter}" in existing:
         counter += 1
@@ -448,23 +460,25 @@ def _expand_single_covariant(cov: CovariantDeriv) -> TensorExpr:
 
     # 내부가 Tensor가 아닌 복합 표현식이면, 먼저 Leibniz 적용
     # ∇_μ (A * B) = (∇_μ A) * B + A * (∇_μ B)
+    # type(cov)로 재귀해야 SpatialCovariantDeriv 등 subclass가 유지됨
+    cov_cls = type(cov)
     if isinstance(inner, TensorProduct):
-        left_cov = CovariantDeriv(inner.left, d_idx, connections)
-        right_cov = CovariantDeriv(inner.right, d_idx, connections)
+        left_cov = cov_cls(inner.left, d_idx, connections)
+        right_cov = cov_cls(inner.right, d_idx, connections)
         dA_B = TensorProduct(left_cov, inner.right)
         A_dB = TensorProduct(inner.left, right_cov)
         return expand_covariant(TensorSum(dA_B, A_dB))
 
     if isinstance(inner, TensorSum):
         return expand_covariant(TensorSum(
-            CovariantDeriv(inner.left, d_idx, connections),
-            CovariantDeriv(inner.right, d_idx, connections),
+            cov_cls(inner.left, d_idx, connections),
+            cov_cls(inner.right, d_idx, connections),
         ))
 
     if isinstance(inner, ScalarMul):
         return ScalarMul(
             inner.scalar,
-            expand_covariant(CovariantDeriv(inner.expr, d_idx, connections)),
+            expand_covariant(cov_cls(inner.expr, d_idx, connections)),
         )
 
     # 내부가 Tensor(잎 노드): ∂ + Γ 항 생성

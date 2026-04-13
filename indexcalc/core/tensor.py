@@ -95,9 +95,19 @@ class Tensor(TensorExpr):
     (1, 1)
     """
 
-    def __init__(self, name: str, indices: list[Index]):
+    def __init__(
+        self,
+        name: str,
+        indices: list[Index],
+        antisymmetric_pairs: list[tuple[int, int]] | None = None,
+    ):
         self.name = name
         self.indices = tuple(indices)
+        # antisymmetric_pairs: 서로 바꾸면 -1 배인 slot 쌍 목록. 예: B_μν = -B_νμ
+        # → antisymmetric_pairs=[(0, 1)]
+        self.antisymmetric_pairs: tuple[tuple[int, int], ...] = tuple(
+            tuple(sorted(p)) for p in (antisymmetric_pairs or [])
+        )
 
     @property
     def free_indices(self) -> list[Index]:

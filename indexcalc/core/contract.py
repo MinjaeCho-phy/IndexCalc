@@ -27,6 +27,8 @@ def collect_tensors(expr: TensorExpr) -> list[Tensor]:
     >>> collect_tensors(expr)
     [T^μ_ν, S^ν_λ]
     """
+    from indexcalc.core.variation import Variation, ZeroTensor
+
     if isinstance(expr, Tensor):
         return [expr]
     if isinstance(expr, TensorProduct):
@@ -36,18 +38,50 @@ def collect_tensors(expr: TensorExpr) -> list[Tensor]:
         return collect_tensors(expr.left)
     if isinstance(expr, ScalarMul):
         return collect_tensors(expr.expr)
+    if isinstance(expr, Variation):
+        return collect_tensors(expr.expr)
+    if isinstance(expr, ZeroTensor):
+        return []
     return []
 
 
 def collect_all_indices(expr: TensorExpr) -> list[Index]:
-    """표현식의 모든 Tensor에 달린 인덱스를 평탄하게 수집한다.
+    """표현식의 모든 인덱스를 평탄하게 수집한다.
 
-    TensorProduct의 contraction 결과가 아니라, 원본 텐서들의 인덱스를 모은다.
+    Tensor에 달린 인덱스뿐 아니라 ``PartialDeriv``/``CovariantDeriv`` 노드의
+    미분 인덱스(``deriv_index``)도 함께 수집한다. 이렇게 해야 ``∂_k ∂_k E``
+    처럼 같은 이름의 미분 인덱스가 중첩된 식을 ``validate_einstein``이
+    Einstein convention 위반으로 잡아낼 수 있다.
     """
-    tensors = collect_tensors(expr)
-    indices = []
-    for t in tensors:
-        indices.extend(t.indices)
+    # Local import to avoid a hard module-load cycle with deriv.py, which
+    # imports from tensor.py only. contract.py is loaded before deriv.py in
+    # __init__.py, so deferring this import keeps things deterministic.
+    from indexcalc.core.deriv import PartialDeriv, CovariantDeriv
+    from indexcalc.core.variation import Variation
+
+    indices: list[Index] = []
+
+    def walk(e: TensorExpr) -> None:
+        if isinstance(e, Tensor):
+            indices.extend(e.indices)
+        elif isinstance(e, (PartialDeriv, CovariantDeriv)):
+            indices.append(e.deriv_index)
+            walk(e.expr)
+        elif isinstance(e, Variation):
+            walk(e.expr)
+        elif isinstance(e, TensorProduct):
+            walk(e.left)
+            walk(e.right)
+        elif isinstance(e, TensorSum):
+            # 합의 경우 왼쪽 항만 구조 분석 대상으로 삼는다 (기존 관례 유지).
+            walk(e.left)
+        elif isinstance(e, ScalarMul):
+            walk(e.expr)
+        elif isinstance(e, Trace):
+            walk(e.tensor)
+        # 기타 미지 노드는 무시 (ZeroTensor 포함)
+
+    walk(expr)
     return indices
 
 

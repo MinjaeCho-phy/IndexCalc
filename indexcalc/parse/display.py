@@ -19,6 +19,60 @@ from indexcalc.core.contract import Trace
 
 # ─── 문자 → LaTeX 매핑 ──────────────────────────────────────
 
+# Unicode combining marks → LaTeX decorator command.
+# Mirrors _DECORATOR_COMBINING in parse/latex.py; both directions must agree.
+_COMBINING_TO_DECORATOR = {
+    "\u0304": "bar",
+    "\u0302": "hat",
+    "\u0303": "tilde",
+    "\u0307": "dot",
+    "\u0308": "ddot",
+}
+
+
+def _split_grapheme(name: str) -> tuple[str, list[str]]:
+    """Split name into (base, [combining_marks]) using first grapheme only.
+
+    "ē" (e + U+0304) → ("e", ["\\u0304"]).
+    "e"              → ("e", []).
+    "μ̄"              → ("μ", ["\\u0304"]).
+    "ab"             → ("ab", [])  — no combining marks, multi-char kept whole.
+    """
+    if not name:
+        return name, []
+    marks = []
+    # Find the first combining mark; everything before it is the base.
+    base_end = 1
+    while base_end < len(name) and not (
+        0x0300 <= ord(name[base_end]) <= 0x036F
+    ):
+        base_end += 1
+    base = name[:base_end]
+    i = base_end
+    while i < len(name) and 0x0300 <= ord(name[i]) <= 0x036F:
+        marks.append(name[i])
+        i += 1
+    # Anything after the combining marks is returned as trailing base (rare)
+    if i < len(name):
+        base = base + "?" + name[i:]  # should not happen in practice
+    return base, marks
+
+
+def _wrap_decorators(latex_base: str, marks: list[str]) -> str:
+    """Wrap a LaTeX base string with decorator commands from combining marks.
+
+    marks=[U+0304, U+0302]  ⇒  \\hat{\\bar{<base>}}  (outermost last).
+    Unknown combining marks pass through unchanged.
+    """
+    for mark in marks:
+        decorator = _COMBINING_TO_DECORATOR.get(mark)
+        if decorator:
+            latex_base = f"\\{decorator}{{{latex_base}}}"
+        else:
+            latex_base = latex_base + mark
+    return latex_base
+
+
 _GREEK_MAP = {
     # lowercase
     "α": r"\alpha", "β": r"\beta", "γ": r"\gamma", "δ": r"\delta",
@@ -40,31 +94,43 @@ _GREEK_MAP = {
 def _latex_char(name: str) -> str:
     """인덱스 이름이나 텐서 이름의 단일 문자를 LaTeX로 변환한다.
 
-    - 그리스 문자: μ → \\mu
-    - dummy index: μ_1 → \\mu_1
-    - 로마자: 그대로
+    - 그리스 문자:    μ → \\mu
+    - 장식된 문자:    p̄ → \\bar{p},  B̂ → \\hat{B}
+    - dummy index:   μ_1 → \\mu_{1},  p̄_1 → \\bar{p}_{1}
+    - 로마자:         그대로
     """
     # dummy index: base_number 형식
     if "_" in name:
         base, suffix = name.split("_", 1)
-        base_latex = _GREEK_MAP.get(base, base)
+        base_core, marks = _split_grapheme(base)
+        base_latex = _GREEK_MAP.get(base_core, base_core)
+        base_latex = _wrap_decorators(base_latex, marks)
         return f"{base_latex}_{{{suffix}}}"
 
-    return _GREEK_MAP.get(name, name)
+    base_core, marks = _split_grapheme(name)
+    base_latex = _GREEK_MAP.get(base_core, base_core)
+    return _wrap_decorators(base_latex, marks)
 
 
 def _latex_tensor_name(name: str) -> str:
     """텐서 이름을 LaTeX로 변환한다.
 
-    - 단일 그리스 문자: η → \\eta
-    - 여러 글자 이름: 그대로 (이미 LaTeX 호환)
+    - 단일 그리스 문자:   η → \\eta
+    - 장식된 문자:        ē → \\bar{e},  B̂ → \\hat{B}
+    - 여러 글자 이름:      그대로 (이미 LaTeX 호환)
     - \\로 시작하면 그대로 (이미 LaTeX 명령)
     """
     if name.startswith("\\"):
         return name
-    if len(name) == 1:
-        return _GREEK_MAP.get(name, name)
-    # 여러 글자인데 첫 글자가 그리스면 변환
+
+    # Single grapheme (1 base + optional combining marks)
+    base_core, marks = _split_grapheme(name)
+    if base_core + "".join(marks) == name:
+        # pure single-grapheme name
+        base_latex = _GREEK_MAP.get(base_core, base_core)
+        return _wrap_decorators(base_latex, marks)
+
+    # Multi-character name: preserve as-is unless it's a known Greek word
     if name in _GREEK_MAP:
         return _GREEK_MAP[name]
     return name
@@ -206,6 +272,16 @@ def to_latex(expr: TensorExpr) -> str:
         # 기본: contracted index 형태로 출력 (Einstein convention)
         return to_latex(expr.tensor)
 
+    # ZeroTensor: 0
+    from indexcalc.core.variation import Variation, ZeroTensor
+    if isinstance(expr, ZeroTensor):
+        return "0"
+
+    # Variation: δ(expr)
+    if isinstance(expr, Variation):
+        inner = to_latex(expr.expr)
+        return f"\\delta({inner})"
+
     # PartialDeriv: ∂_μ T^ν_λ
     from indexcalc.core.deriv import PartialDeriv, CovariantDeriv
     if isinstance(expr, PartialDeriv):
@@ -214,6 +290,15 @@ def to_latex(expr: TensorExpr) -> str:
         if isinstance(expr.expr, (TensorProduct, TensorSum)):
             inner = f"({inner})"
         return f"\\partial_{{{idx_latex}}} {inner}"
+
+    # SpatialCovariantDeriv: D_i T (CovariantDeriv의 subclass이므로 먼저 검사)
+    from indexcalc.core.spatial_deriv import SpatialCovariantDeriv
+    if isinstance(expr, SpatialCovariantDeriv):
+        idx_latex = _latex_char(expr.deriv_index.name)
+        inner = to_latex(expr.expr)
+        if isinstance(expr.expr, (TensorProduct, TensorSum)):
+            inner = f"({inner})"
+        return f"D_{{{idx_latex}}} {inner}"
 
     # CovariantDeriv: ∇_μ T^ν_λ
     if isinstance(expr, CovariantDeriv):
