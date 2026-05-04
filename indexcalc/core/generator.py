@@ -201,12 +201,107 @@ def su_n_adj_action(
     return action
 
 
+def su_n_fund_action(
+    adj_space: IndexSpace,
+    fund_space: IndexSpace,
+    parameter_name: str = "a",
+    rep_matrix_name: str = "T",
+) -> ActionFn:
+    """SU(N) fund / antifund rep 작용 factory.
+
+    Convention:
+        $\\delta_a \\phi^i = i (T^a)^i{}_j \\phi^j$ (fund — input fund-upper).
+        $\\delta_a \\phi_i = -i \\phi_j (T^a)^j{}_i$ (antifund — input fund-lower).
+
+    $T^a$는 rep matrix tensor (이름 ``rep_matrix_name``, 기본 ``"T"``):
+        - adj parameter index (upper)
+        - fund row index (matches input position)
+        - fund col index (opposite to input — contracts with renamed field)
+
+    각 호출 시 fresh dummy name 발급 (parameter는 generator 인스턴스에서 고정).
+
+    Parameters
+    ----------
+    adj_space : IndexSpace
+    fund_space : IndexSpace
+    parameter_name : str
+        adj parameter index 이름 (free).
+    rep_matrix_name : str
+        rep matrix tensor 이름.
+    """
+
+    def action(field: Tensor) -> TensorExpr:
+        fund_indices = [
+            (i, idx) for i, idx in enumerate(field.indices)
+            if idx.space == fund_space
+        ]
+        if len(fund_indices) != 1:
+            raise ValueError(
+                f"su_n_fund_action: field {field.name!r} expected to have exactly "
+                f"one index in {fund_space.name!r}, got {len(fund_indices)}"
+            )
+        slot, fund_idx = fund_indices[0]
+        position = fund_idx.position
+
+        # fresh dummy
+        existing = {idx.name for idx in field.indices} | {parameter_name}
+        base = fund_space.indices[0] if fund_space.indices else "i"
+        dummy = base
+        n = 1
+        while dummy in existing:
+            dummy = f"{base}_{n}"
+            n += 1
+
+        if position == "upper":
+            # δ φ^i = i T^{a,i}_j φ^j
+            T = Tensor(
+                rep_matrix_name,
+                [
+                    Index(parameter_name, adj_space, "upper"),
+                    Index(fund_idx.name, fund_space, "upper"),  # row matches input
+                    Index(dummy, fund_space, "lower"),  # col contracts with renamed
+                ],
+            )
+            new_indices = list(field.indices)
+            new_indices[slot] = Index(dummy, fund_space, "upper")
+            renamed = Tensor(
+                field.name, new_indices,
+                antisymmetric_pairs=list(field.antisymmetric_pairs),
+                reps=dict(field.reps),
+                statistics=field.statistics,
+            )
+            return ScalarMul(1j, TensorProduct(T, renamed))
+        else:  # lower (antifund)
+            # δ φ_i = -i φ_j T^{a,j}_i
+            T = Tensor(
+                rep_matrix_name,
+                [
+                    Index(parameter_name, adj_space, "upper"),
+                    Index(dummy, fund_space, "upper"),  # row contracts with renamed
+                    Index(fund_idx.name, fund_space, "lower"),  # col matches input
+                ],
+            )
+            new_indices = list(field.indices)
+            new_indices[slot] = Index(dummy, fund_space, "lower")
+            renamed = Tensor(
+                field.name, new_indices,
+                antisymmetric_pairs=list(field.antisymmetric_pairs),
+                reps=dict(field.reps),
+                statistics=field.statistics,
+            )
+            return ScalarMul(-1j, TensorProduct(renamed, T))
+
+    return action
+
+
 def make_su_n_generator(
     group: Group,
     adj_space: IndexSpace,
     parameter_name: str = "b",
     structure_const_name: str = "f",
     name: Optional[str] = None,
+    fund_space: Optional[IndexSpace] = None,
+    rep_matrix_name: str = "T",
 ) -> Generator:
     """SU(N) Group에 등록된 adj/singlet rep에 대한 표준 generator를 만든다.
 
@@ -242,6 +337,18 @@ def make_su_n_generator(
     if group.has_rep("singlet"):
         # singlet field에 대한 작용: 0 (ZeroTensor)
         gen.declare_action("singlet", lambda field: ZeroTensor(field.free_indices))
+
+    # fund / antifund 등록 — fund_space가 주어진 경우만
+    if fund_space is not None:
+        fund_act = su_n_fund_action(
+            adj_space, fund_space,
+            parameter_name=parameter_name,
+            rep_matrix_name=rep_matrix_name,
+        )
+        if group.has_rep("fund"):
+            gen.declare_action("fund", fund_act)
+        if group.has_rep("antifund"):
+            gen.declare_action("antifund", fund_act)
 
     return gen
 

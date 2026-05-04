@@ -196,6 +196,53 @@ def is_structurally_equal(
     return canonical_form(e1, swap_names) == canonical_form(e2, swap_names)
 
 
+def canonical_form_modulo_dummies(expr: TensorExpr) -> tuple:
+    """Canonical form with **dummy index renaming** — ``collect_scalar_terms`` 전용.
+
+    Strict ``canonical_form``과의 차이:
+        - 정확히 두 번 등장하는 (그리고 expr.free_indices에 없는) 인덱스 이름들은
+          dummy로 간주, sorted-factor의 등장 순서대로 ``_d0, _d1, …``로 canonical
+          rename 후 비교.
+        - 두 표현식이 ``dummy 이름만 다른`` 경우 같은 canonical form을 갖는다.
+
+    Use case: SU(2) doublet 변환에서 두 Leibniz 항의 body가 dummy 인덱스만 다르고
+    구조적으로는 같은 식. ``collect_scalar_terms``가 이를 같은 group으로 묶어
+    스칼라 합산 → 0 검출.
+
+    NOT used by ``is_zero_by_antisym_swap`` — 거기선 free renaming이 false positive
+    (X·Y 류)를 일으키므로 strict ``canonical_form``을 유지.
+    """
+    factors = collect_factors(expr)
+
+    # 1. dummy 식별 — count == 2 + free_indices에 없음
+    name_counts = _index_name_count(factors)
+    free_names = {idx.name for idx in expr.free_indices}
+    dummy_names = {
+        n for n, c in name_counts.items()
+        if c == 2 and n not in free_names
+    }
+
+    # 2. dummy를 hidden한 채 factors 정렬
+    indexed = sorted(
+        ((_factor_key_no_swap(f, list(dummy_names)), i)
+         for i, f in enumerate(factors)),
+    )
+    sorted_factors = [factors[i] for _, i in indexed]
+
+    # 3. sorted 순서로 dummy에 canonical 이름 부여
+    mapping: dict[str, str] = {}
+    counter = 0
+    for f in sorted_factors:
+        for nm in _collect_factor_index_names(f):
+            if nm in dummy_names and nm not in mapping:
+                mapping[nm] = f"_d{counter}"
+                counter += 1
+
+    # 4. mapping 적용 후 full key로 정렬
+    renamed = [rename_index(f, mapping) for f in sorted_factors]
+    return tuple(sorted(_factor_key_no_swap(f, ()) for f in renamed))
+
+
 # ─── antisym × symmetric → 0 ────────────────────────────────
 
 
@@ -378,14 +425,23 @@ def collect_scalar_terms(expr: TensorExpr) -> TensorExpr:
 
     summands = _flatten_sum(expr)
 
-    # body의 canonical form을 키로 group
+    # body의 canonical form (dummy 이름 무관)을 키로 group
     groups: dict[tuple, list] = {}
+    has_zero_body = False
     for s in summands:
         scalar, body = _split_scalar(s)
         if isinstance(body, ZeroTensor):
+            has_zero_body = True
             continue  # 0 항 무시
-        key = canonical_form(body)
+        key = canonical_form_modulo_dummies(body)
         groups.setdefault(key, []).append((scalar, body))
+
+    # 변경이 일어날 만한 경우인지 조기 판정 (idempotency 보장):
+    # ZeroTensor 항이 있거나, 어떤 group이 다수 항을 갖거나, 합이 0이거나.
+    will_change = has_zero_body or any(len(items) > 1 for items in groups.values())
+    if not will_change:
+        # 모든 group이 단일 항 → 원본을 그대로 반환 (fixed point에서 무한루프 방지)
+        return expr
 
     new_summands: list[TensorExpr] = []
     for key, items in groups.items():
@@ -424,14 +480,15 @@ def simplify(expr: TensorExpr) -> TensorExpr:
     """
     from indexcalc.core.variation import _simplify_zeros
 
-    prev = None
     cur = expr
-    while prev is not cur:
+    for _ in range(20):  # max 20 passes — guards against rule-cycle
         prev = cur
         cur = _simplify_once(cur)
         cur = pull_scalars(cur)
         cur = collect_scalar_terms(cur)
         cur = _simplify_zeros(cur)
+        if cur is prev:
+            break
     return cur
 
 

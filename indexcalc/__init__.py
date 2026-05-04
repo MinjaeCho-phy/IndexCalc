@@ -27,7 +27,7 @@ from indexcalc.core.invariant_tensors import (
 )
 from indexcalc.core.generator import (
     Generator, u1_action, make_u1_generator,
-    su_n_adj_action, make_su_n_generator,
+    su_n_adj_action, su_n_fund_action, make_su_n_generator,
 )
 from indexcalc.core.substitution import apply_generator
 from indexcalc.evaluate.component import evaluate
@@ -55,7 +55,7 @@ __all__ = [
     "standard_su_n_invariants", "standard_u_n_invariants",
     "standard_lorentz_invariants",
     "Generator", "u1_action", "make_u1_generator",
-    "su_n_adj_action", "make_su_n_generator",
+    "su_n_adj_action", "su_n_fund_action", "make_su_n_generator",
     "apply_generator",
     "evaluate",
     "Coordinates", "parse_signature",
