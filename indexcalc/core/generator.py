@@ -294,6 +294,240 @@ def su_n_fund_action(
     return action
 
 
+# ─── Helper: Lorentz spinor generator action ─────────────────
+
+
+def lorentz_spinor_action(
+    frame_space: IndexSpace,
+    spinor_space: IndexSpace,
+    parameter_names: tuple = ("a", "b"),
+    generator_name: str = "Sigma",
+) -> ActionFn:
+    """Lorentz spinor rep 작용 ($SO(1, D-1)$, Dirac).
+
+    Convention:
+        $\\delta\\psi^\\alpha = -\\tfrac{i}{2}\\, \\Sigma^{ab}{}^\\alpha{}_\\beta\\, \\psi^\\beta$
+        $\\delta\\bar\\psi_\\alpha = +\\tfrac{i}{2}\\, \\bar\\psi_\\beta\\, \\Sigma^{ab}{}^\\beta{}_\\alpha$
+
+    Parameter indices ``(a, b)`` are antisymmetric (Lorentz generator pair).
+    각 호출 시 fresh dummy spinor name 발급.
+
+    Parameters
+    ----------
+    frame_space : IndexSpace
+        Lorentz frame (vector) 인덱스 공간 — 보통 metric 갖는 Minkowski.
+    spinor_space : IndexSpace
+        Dirac spinor 공간 — 보통 metric 없음.
+    parameter_names : tuple[str, str]
+        antisym 쌍의 두 frame 이름 (default ``("a", "b")``).
+    generator_name : str
+        Σ tensor 이름 (default ``"Sigma"``).
+    """
+    a_name, b_name = parameter_names
+
+    def action(field: Tensor) -> TensorExpr:
+        spinor_indices = [
+            (i, idx) for i, idx in enumerate(field.indices)
+            if idx.space == spinor_space
+        ]
+        if len(spinor_indices) != 1:
+            raise ValueError(
+                f"lorentz_spinor_action: field {field.name!r} expected to have "
+                f"exactly one index in {spinor_space.name!r}, got {len(spinor_indices)}"
+            )
+        slot, sp_idx = spinor_indices[0]
+        position = sp_idx.position
+
+        # fresh spinor dummy
+        existing = (
+            {idx.name for idx in field.indices}
+            | {a_name, b_name}
+        )
+        base = spinor_space.indices[0] if spinor_space.indices else "α"
+        dummy = base
+        n = 1
+        while dummy in existing:
+            dummy = f"{base}_{n}"
+            n += 1
+
+        if position == "upper":
+            # δψ^α = -i/2 Σ^{ab,α}_β ψ^β
+            Sigma = Tensor(
+                generator_name,
+                [
+                    Index(a_name, frame_space, "upper"),
+                    Index(b_name, frame_space, "upper"),
+                    Index(sp_idx.name, spinor_space, "upper"),  # row matches input
+                    Index(dummy, spinor_space, "lower"),  # col contracts with renamed
+                ],
+                antisymmetric_pairs=[(0, 1)],
+            )
+            new_indices = list(field.indices)
+            new_indices[slot] = Index(dummy, spinor_space, "upper")
+            renamed = Tensor(
+                field.name, new_indices,
+                antisymmetric_pairs=list(field.antisymmetric_pairs),
+                reps=dict(field.reps),
+                statistics=field.statistics,
+            )
+            return ScalarMul(-0.5j, TensorProduct(Sigma, renamed))
+        else:  # lower (conj_spinor)
+            # δψ̄_α = +i/2 ψ̄_β Σ^{ab,β}_α
+            Sigma = Tensor(
+                generator_name,
+                [
+                    Index(a_name, frame_space, "upper"),
+                    Index(b_name, frame_space, "upper"),
+                    Index(dummy, spinor_space, "upper"),  # row contracts with renamed
+                    Index(sp_idx.name, spinor_space, "lower"),  # col matches input
+                ],
+                antisymmetric_pairs=[(0, 1)],
+            )
+            new_indices = list(field.indices)
+            new_indices[slot] = Index(dummy, spinor_space, "lower")
+            renamed = Tensor(
+                field.name, new_indices,
+                antisymmetric_pairs=list(field.antisymmetric_pairs),
+                reps=dict(field.reps),
+                statistics=field.statistics,
+            )
+            return ScalarMul(0.5j, TensorProduct(renamed, Sigma))
+
+    return action
+
+
+def lorentz_vector_action(
+    frame_space: IndexSpace,
+    parameter_names: tuple = ("a", "b"),
+    generator_name: str = "M_vec",
+) -> ActionFn:
+    """Lorentz vector rep 작용 ($SO(1, D-1)$ on 4-vectors).
+
+    Convention:
+        $\\delta V^\\mu = (M^{ab})^\\mu{}_\\nu V^\\nu$  (vector upper)
+        $\\delta V_\\mu = -V_\\nu (M^{ab})^\\nu{}_\\mu$  (vector lower)
+
+    $M^{ab}$는 vector rep matrix tensor — adj 인덱스 (a, b) antisym + frame
+    (row, col). 구체적 components ($M^{ab}_{\\mu\\nu} = i(\\eta^{a\\mu}\\delta^b_\\nu - \\eta^{b\\mu}\\delta^a_\\nu)$)
+    는 IR-level invariance 검증에 불필요 — rep 변환 구조만 표현.
+    """
+    a_name, b_name = parameter_names
+
+    def action(field: Tensor) -> TensorExpr:
+        frame_indices = [
+            (i, idx) for i, idx in enumerate(field.indices)
+            if idx.space == frame_space
+        ]
+        if len(frame_indices) != 1:
+            raise ValueError(
+                f"lorentz_vector_action: field {field.name!r} expected to have "
+                f"exactly one index in {frame_space.name!r}, got {len(frame_indices)}"
+            )
+        slot, fr_idx = frame_indices[0]
+        position = fr_idx.position
+
+        existing = (
+            {idx.name for idx in field.indices}
+            | {a_name, b_name}
+        )
+        base = frame_space.indices[0] if frame_space.indices else "μ"
+        dummy = base
+        n = 1
+        while dummy in existing:
+            dummy = f"{base}_{n}"
+            n += 1
+
+        if position == "upper":
+            # δ V^μ = M^{ab,μ}_ν V^ν  →  (M, V_renamed) product, scalar 1
+            M = Tensor(
+                generator_name,
+                [
+                    Index(a_name, frame_space, "upper"),
+                    Index(b_name, frame_space, "upper"),
+                    Index(fr_idx.name, frame_space, "upper"),  # row matches input
+                    Index(dummy, frame_space, "lower"),  # col contracts with renamed
+                ],
+                antisymmetric_pairs=[(0, 1)],
+            )
+            new_indices = list(field.indices)
+            new_indices[slot] = Index(dummy, frame_space, "upper")
+            renamed = Tensor(
+                field.name, new_indices,
+                antisymmetric_pairs=list(field.antisymmetric_pairs),
+                reps=dict(field.reps),
+                statistics=field.statistics,
+            )
+            return TensorProduct(M, renamed)
+        else:  # lower
+            # δ V_μ = -V_ν M^{ab,ν}_μ
+            M = Tensor(
+                generator_name,
+                [
+                    Index(a_name, frame_space, "upper"),
+                    Index(b_name, frame_space, "upper"),
+                    Index(dummy, frame_space, "upper"),  # row contracts with renamed
+                    Index(fr_idx.name, frame_space, "lower"),  # col matches input
+                ],
+                antisymmetric_pairs=[(0, 1)],
+            )
+            new_indices = list(field.indices)
+            new_indices[slot] = Index(dummy, frame_space, "lower")
+            renamed = Tensor(
+                field.name, new_indices,
+                antisymmetric_pairs=list(field.antisymmetric_pairs),
+                reps=dict(field.reps),
+                statistics=field.statistics,
+            )
+            return ScalarMul(-1.0, TensorProduct(renamed, M))
+
+    return action
+
+
+def make_lorentz_spinor_generator(
+    group: Group,
+    frame_space: IndexSpace,
+    spinor_space: IndexSpace,
+    parameter_names: tuple = ("a", "b"),
+    generator_name: str = "Sigma",
+    name: Optional[str] = None,
+) -> Generator:
+    """Lorentz Group의 표준 generator: spinor / conj_spinor / vector / singlet 자동 등록.
+
+    parameter_names ``(a, b)``는 frame 인덱스의 antisym pair.
+
+    Examples
+    --------
+    >>> from indexcalc.core.index import IndexSpace
+    >>> from indexcalc.core.group import Group
+    >>> lorentz = Group("Lorentz", dim=6, abelian=False)
+    >>> lorentz.add_rep("spinor", dim=4)
+    >>> lorentz.add_rep("conj_spinor", dim=4, conjugate=True)
+    >>> lorentz.add_rep("vector", dim=4)
+    >>> lorentz.add_rep("singlet", dim=1)
+    >>> st = IndexSpace("st", dim=4, indices="μνλρσ", metric="η")
+    >>> sp = IndexSpace("dirac", dim=4, indices="αβγ")
+    >>> g = make_lorentz_spinor_generator(lorentz, st, sp)
+    >>> all(g.has_action(r) for r in ("spinor", "conj_spinor", "vector", "singlet"))
+    True
+    """
+    gen = Generator(name or f"M_{group.name}", group)
+    spinor_act = lorentz_spinor_action(
+        frame_space, spinor_space, parameter_names, generator_name,
+    )
+    vector_act = lorentz_vector_action(
+        frame_space, parameter_names,
+    )
+    if group.has_rep("spinor"):
+        gen.declare_action("spinor", spinor_act)
+    if group.has_rep("conj_spinor"):
+        gen.declare_action("conj_spinor", spinor_act)
+    if group.has_rep("vector"):
+        gen.declare_action("vector", vector_act)
+    if group.has_rep("singlet"):
+        gen.declare_action("singlet", lambda f: ZeroTensor(f.free_indices))
+    return gen
+
+
 def make_su_n_generator(
     group: Group,
     adj_space: IndexSpace,
