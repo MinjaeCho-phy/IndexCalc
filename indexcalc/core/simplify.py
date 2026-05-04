@@ -319,6 +319,64 @@ def is_zero_by_antisym_swap(expr: TensorExpr) -> TensorExpr:
     return expr
 
 
+# ─── Distribute TensorProduct over TensorSum (M5) ───────────
+
+
+def distribute_products(expr: TensorExpr) -> TensorExpr:
+    """``TensorProduct``를 ``TensorSum``에 분배해 sum-of-products 형태로 변환.
+
+    .. math::
+        T \\otimes (A + B) \\to T \\otimes A + T \\otimes B
+        (A + B) \\otimes T \\to A \\otimes T + B \\otimes T
+        c \\cdot (A + B) \\to c \\cdot A + c \\cdot B
+
+    이렇게 평탄화되면 ``collect_scalar_terms``가 모든 항을 한 multiset에 모아
+    canonical body로 group 가능. 4-field 항이나 ``TS`` 중첩 구조에 필요.
+    """
+    if isinstance(expr, TensorProduct):
+        left = distribute_products(expr.left)
+        right = distribute_products(expr.right)
+        if isinstance(left, TensorSum):
+            return distribute_products(
+                TensorSum(
+                    TensorProduct(left.left, right),
+                    TensorProduct(left.right, right),
+                )
+            )
+        if isinstance(right, TensorSum):
+            return distribute_products(
+                TensorSum(
+                    TensorProduct(left, right.left),
+                    TensorProduct(left, right.right),
+                )
+            )
+        if left is not expr.left or right is not expr.right:
+            return TensorProduct(left, right)
+        return expr
+
+    if isinstance(expr, TensorSum):
+        new_l = distribute_products(expr.left)
+        new_r = distribute_products(expr.right)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+
+    if isinstance(expr, ScalarMul):
+        inner = distribute_products(expr.expr)
+        if isinstance(inner, TensorSum):
+            return distribute_products(
+                TensorSum(
+                    ScalarMul(expr.scalar, inner.left),
+                    ScalarMul(expr.scalar, inner.right),
+                )
+            )
+        if inner is not expr.expr:
+            return ScalarMul(expr.scalar, inner)
+        return expr
+
+    return expr
+
+
 # ─── Scalar pull-out + collect-like-terms (M3) ──────────────
 
 
@@ -406,18 +464,29 @@ def collect_scalar_terms(expr: TensorExpr) -> TensorExpr:
     - 합이 0인 group은 drop (전체 group들이 모두 cancel되면 ZeroTensor 반환).
     - 합이 1이면 ScalarMul wrapping 없이 body만 반환.
     - 그 외엔 ScalarMul(total, body)로 wrap.
-    - ``ScalarMul(c, TensorSum(...))`` 같은 nested 구조도 안쪽 sum까지 재귀.
+    - ``ScalarMul(c, TensorSum(...))`` 또는 ``TensorProduct(L, TensorSum(...))``
+      같은 nested 구조도 안쪽까지 재귀.
 
     ``pull_scalars``가 먼저 적용되어 있어야 효과적이다 (그래야 nested ScalarMul이
     하나의 (scalar, body) 쌍으로 normalized).
     """
-    # ScalarMul wrapping a TensorSum: 안으로 재귀
+    # ScalarMul wrapping: 안으로 재귀
     if isinstance(expr, ScalarMul):
         inner = collect_scalar_terms(expr.expr)
         if isinstance(inner, ZeroTensor):
             return inner
         if inner is not expr.expr:
             return ScalarMul(expr.scalar, inner)
+        return expr
+
+    # TensorProduct: 양쪽으로 재귀 (안쪽 TensorSum이 collected될 수 있음)
+    if isinstance(expr, TensorProduct):
+        new_l = collect_scalar_terms(expr.left)
+        new_r = collect_scalar_terms(expr.right)
+        if isinstance(new_l, ZeroTensor) or isinstance(new_r, ZeroTensor):
+            return ZeroTensor(expr.free_indices)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorProduct(new_l, new_r)
         return expr
 
     if not isinstance(expr, TensorSum):
@@ -484,6 +553,7 @@ def simplify(expr: TensorExpr) -> TensorExpr:
     for _ in range(20):  # max 20 passes — guards against rule-cycle
         prev = cur
         cur = _simplify_once(cur)
+        cur = distribute_products(cur)
         cur = pull_scalars(cur)
         cur = collect_scalar_terms(cur)
         cur = _simplify_zeros(cur)

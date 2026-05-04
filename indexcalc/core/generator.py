@@ -28,12 +28,25 @@ Examples
 """
 
 from __future__ import annotations
+import itertools
 from typing import Callable, Optional
 
 from indexcalc.core.group import Group, Representation
 from indexcalc.core.index import Index, IndexSpace
 from indexcalc.core.tensor import Tensor, TensorExpr, TensorProduct, ScalarMul
 from indexcalc.core.variation import ZeroTensor
+
+
+# 모든 generator action factory가 공유하는 fresh dummy name counter.
+# 같은 expression tree 안에서 여러 leaf에 action이 적용될 때 globally unique한
+# 이름을 보장. ``canonical_form_modulo_dummies``의 ``_d{n}`` 와 충돌하지 않도록
+# prefix 분리 (``_act{n}``).
+_dummy_counter = itertools.count()
+
+
+def _fresh_dummy_name(base: str = "_act") -> str:
+    """Generator action factory들이 공유하는 globally-unique dummy 이름 발급."""
+    return f"{base}{next(_dummy_counter)}"
 
 
 # ─── Action signature ──────────────────────────────────────────
@@ -165,14 +178,8 @@ def su_n_adj_action(
             )
         slot, adj_idx = adj_indices[0]
 
-        # fresh dummy name 발급 (field의 기존 인덱스 + parameter 이름과 충돌 회피)
-        existing = {idx.name for idx in field.indices} | {parameter_name}
-        base = adj_space.indices[0] if adj_space.indices else "c"
-        dummy_name = base
-        n = 1
-        while dummy_name in existing:
-            dummy_name = f"{base}_{n}"
-            n += 1
+        # globally unique dummy (앞뒤 expression context에 등장하는 어떤 이름과도 충돌 X)
+        dummy_name = _fresh_dummy_name()
 
         # f tensor: [field's adj position, param lower, dummy lower]. all-pair antisymmetric.
         f_first = Index(adj_idx.name, adj_space, adj_idx.position)
@@ -243,14 +250,8 @@ def su_n_fund_action(
         slot, fund_idx = fund_indices[0]
         position = fund_idx.position
 
-        # fresh dummy
-        existing = {idx.name for idx in field.indices} | {parameter_name}
-        base = fund_space.indices[0] if fund_space.indices else "i"
-        dummy = base
-        n = 1
-        while dummy in existing:
-            dummy = f"{base}_{n}"
-            n += 1
+        # globally unique dummy
+        dummy = _fresh_dummy_name()
 
         if position == "upper":
             # δ φ^i = i T^{a,i}_j φ^j
@@ -338,17 +339,8 @@ def lorentz_spinor_action(
         slot, sp_idx = spinor_indices[0]
         position = sp_idx.position
 
-        # fresh spinor dummy
-        existing = (
-            {idx.name for idx in field.indices}
-            | {a_name, b_name}
-        )
-        base = spinor_space.indices[0] if spinor_space.indices else "α"
-        dummy = base
-        n = 1
-        while dummy in existing:
-            dummy = f"{base}_{n}"
-            n += 1
+        # globally unique dummy
+        dummy = _fresh_dummy_name()
 
         if position == "upper":
             # δψ^α = -i/2 Σ^{ab,α}_β ψ^β
@@ -426,16 +418,8 @@ def lorentz_vector_action(
         slot, fr_idx = frame_indices[0]
         position = fr_idx.position
 
-        existing = (
-            {idx.name for idx in field.indices}
-            | {a_name, b_name}
-        )
-        base = frame_space.indices[0] if frame_space.indices else "μ"
-        dummy = base
-        n = 1
-        while dummy in existing:
-            dummy = f"{base}_{n}"
-            n += 1
+        # globally unique dummy
+        dummy = _fresh_dummy_name()
 
         if position == "upper":
             # δ V^μ = M^{ab,μ}_ν V^ν  →  (M, V_renamed) product, scalar 1

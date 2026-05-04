@@ -44,12 +44,17 @@ def apply_generator(expr: TensorExpr, generator: Generator) -> TensorExpr:
         return _simplify_zeros(generator.apply_to(expr))
 
     if isinstance(expr, TensorSum):
-        return _simplify_zeros(
-            TensorSum(
-                apply_generator(expr.left, generator),
-                apply_generator(expr.right, generator),
-            )
-        )
+        dL = apply_generator(expr.left, generator)
+        dR = apply_generator(expr.right, generator)
+        # ZeroTensor 조기 처리 — TensorSum의 free index count check 회피.
+        # 한 항이 singlet(0)인 경우 다른 항이 가진 parameter free index만 살아남음.
+        if isinstance(dL, ZeroTensor) and isinstance(dR, ZeroTensor):
+            return ZeroTensor(expr.free_indices)
+        if isinstance(dL, ZeroTensor):
+            return dR
+        if isinstance(dR, ZeroTensor):
+            return dL
+        return _simplify_zeros(TensorSum(dL, dR))
 
     if isinstance(expr, TensorProduct):
         dA = apply_generator(expr.left, generator)
