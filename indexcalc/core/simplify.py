@@ -108,9 +108,17 @@ def collect_factors(expr: TensorExpr) -> list[TensorExpr]:
 
 
 def _index_key(idx: Index, swap_names: Sequence[str]) -> tuple:
-    """인덱스의 정렬용 key. swap_names에 속한 이름은 placeholder로 가린다."""
+    """인덱스의 정렬용 key.
+
+    swap_names에 속한 이름은 placeholder로 가린다 (현재 use case에선 unused).
+    공간이 metric을 갖고 있으면 (e.g., $\\kappa = \\delta$ for compact adj,
+    $\\eta_{\\mu\\nu}$ for Lorentz frame) position을 ``"*"`` 로 collapse —
+    raise/lower가 component identity인 공간에선 위치 구분이 canonical 비교에
+    영향을 주지 않아야 하므로.
+    """
     name_token = "?" if idx.name in swap_names else idx.name
-    return (idx.space.name, idx.position, name_token)
+    position = "*" if idx.space.metric else idx.position
+    return (idx.space.name, position, name_token)
 
 
 def _factor_key_no_swap(factor: TensorExpr, swap_names: Sequence[str]) -> tuple:
