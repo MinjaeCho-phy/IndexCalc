@@ -9,6 +9,7 @@ from indexcalc.core.simplify import (
     rename_index, collect_factors,
     canonical_form, is_structurally_equal,
     is_zero_by_antisym_swap, simplify,
+    pull_scalars, collect_scalar_terms,
 )
 
 
@@ -237,3 +238,108 @@ class TestSimplifyTopLevel:
         result1 = simplify(Y)
         result2 = simplify(result1)
         assert result2 is result1 or result2 == result1
+
+
+# ─── M3: pull_scalars + collect_scalar_terms ────────────────
+
+
+class TestPullScalars:
+    def test_scalar_inside_product_hoisted_left(self, adj):
+        A = Tensor("A", [adj.upper("a")])
+        B = Tensor("B", [adj.lower("a")])
+        expr = TensorProduct(ScalarMul(2.0, A), B)
+        result = pull_scalars(expr)
+        assert isinstance(result, ScalarMul)
+        assert result.scalar == 2.0
+        assert isinstance(result.expr, TensorProduct)
+
+    def test_scalar_inside_product_hoisted_right(self, adj):
+        A = Tensor("A", [adj.upper("a")])
+        B = Tensor("B", [adj.lower("a")])
+        expr = TensorProduct(A, ScalarMul(3.0, B))
+        result = pull_scalars(expr)
+        assert isinstance(result, ScalarMul)
+        assert result.scalar == 3.0
+
+    def test_scalars_combined_both_sides(self, adj):
+        A = Tensor("A", [adj.upper("a")])
+        B = Tensor("B", [adj.lower("a")])
+        expr = TensorProduct(ScalarMul(2.0, A), ScalarMul(3.0, B))
+        result = pull_scalars(expr)
+        assert isinstance(result, ScalarMul)
+        assert result.scalar == 6.0
+
+    def test_nested_scalar_mul_flattened(self, adj):
+        A = Tensor("A", [adj.upper("a")])
+        expr = ScalarMul(2.0, ScalarMul(3.0, A))
+        result = pull_scalars(expr)
+        assert isinstance(result, ScalarMul)
+        assert result.scalar == 6.0
+        assert result.expr is A
+
+    def test_scalar_through_partial(self, adj, st):
+        A = Tensor("A", [], reps={})
+        expr = PartialDeriv_module = None  # placeholder
+        # 스칼라는 ∂_μ 통과 (linearity)
+        from indexcalc.core.deriv import PartialDeriv
+        sm = ScalarMul(5.0, A)
+        deriv = PartialDeriv(sm, st.lower("μ"))
+        result = pull_scalars(deriv)
+        assert isinstance(result, ScalarMul)
+        assert result.scalar == 5.0
+        assert isinstance(result.expr, PartialDeriv)
+
+
+class TestCollectScalarTerms:
+    def test_two_opposite_scalars_cancel(self, adj):
+        A = Tensor("A", [adj.upper("a")])
+        B = Tensor("B", [adj.lower("a")])
+        body = TensorProduct(A, B)
+        expr = TensorSum(ScalarMul(1j, body), ScalarMul(-1j, body))
+        result = collect_scalar_terms(expr)
+        assert isinstance(result, ZeroTensor)
+
+    def test_partial_cancel_residual(self, adj):
+        A = Tensor("A", [adj.upper("a")])
+        B = Tensor("B", [adj.lower("a")])
+        body = TensorProduct(A, B)
+        expr = TensorSum(
+            ScalarMul(3.0, body),
+            ScalarMul(-1.0, body),
+        )
+        result = collect_scalar_terms(expr)
+        # 합이 2.0 → ScalarMul wrap
+        assert isinstance(result, ScalarMul)
+        assert result.scalar == 2.0
+
+    def test_full_cancel_residual_one(self, adj):
+        A = Tensor("A", [adj.upper("a")])
+        B = Tensor("B", [adj.lower("a")])
+        body = TensorProduct(A, B)
+        expr = TensorSum(
+            ScalarMul(2.0, body),
+            ScalarMul(-1.0, body),
+        )
+        result = collect_scalar_terms(expr)
+        # 합 = 1.0 → ScalarMul drop, body만
+        assert is_structurally_equal(result, body)
+
+    def test_distinct_bodies_kept(self, adj):
+        A = Tensor("A", [])
+        B = Tensor("B", [])
+        expr = TensorSum(ScalarMul(2.0, A), ScalarMul(3.0, B))
+        result = collect_scalar_terms(expr)
+        # 두 다른 body → 둘 다 유지
+        assert isinstance(result, TensorSum)
+
+    def test_simplify_pipeline_cancellation(self, adj):
+        """simplify가 pull_scalars + collect_scalar_terms를 조합해 cancellation 수행."""
+        A = Tensor("A", [adj.upper("a")])
+        B = Tensor("B", [adj.lower("a")])
+        # δ(AB) under U(1)-style transformation: (-i AB) + (+i AB) = 0
+        expr = TensorSum(
+            TensorProduct(ScalarMul(-1j, A), B),
+            TensorProduct(A, ScalarMul(1j, B)),
+        )
+        result = simplify(expr)
+        assert isinstance(result, ZeroTensor)

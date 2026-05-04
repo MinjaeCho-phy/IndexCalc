@@ -272,13 +272,155 @@ def is_zero_by_antisym_swap(expr: TensorExpr) -> TensorExpr:
     return expr
 
 
-def simplify(expr: TensorExpr) -> TensorExpr:
-    """현재까지의 정규화 규칙을 적용해 expr을 단순화한다 (fixed point until no change).
+# ─── Scalar pull-out + collect-like-terms (M3) ──────────────
 
-    M2 시점 적용 규칙:
-        - TensorSum / ScalarMul / TensorProduct에 대해 재귀적으로 simplify.
-        - is_zero_by_antisym_swap.
-        - ZeroTensor 흡수 (variation.py의 _simplify_zeros 재사용).
+
+def pull_scalars(expr: TensorExpr) -> TensorExpr:
+    """``ScalarMul``을 가능한 한 ``TensorProduct``/``PartialDeriv`` 밖으로 hoist.
+
+    규칙:
+        - ScalarMul(c1, X) * ScalarMul(c2, Y)  →  ScalarMul(c1*c2, X*Y)
+        - ScalarMul(c, X) * Y                  →  ScalarMul(c, X*Y)
+        - X * ScalarMul(c, Y)                  →  ScalarMul(c, X*Y)
+        - ∂_μ(ScalarMul(c, X))                 →  ScalarMul(c, ∂_μ(X))     (linearity)
+        - ScalarMul(c1, ScalarMul(c2, X))      →  ScalarMul(c1*c2, X)
+        - TensorSum, ScalarMul: 재귀.
+    """
+    if isinstance(expr, TensorProduct):
+        left = pull_scalars(expr.left)
+        right = pull_scalars(expr.right)
+        if isinstance(left, ScalarMul) and isinstance(right, ScalarMul):
+            return ScalarMul(
+                left.scalar * right.scalar,
+                TensorProduct(left.expr, right.expr),
+            )
+        if isinstance(left, ScalarMul):
+            return ScalarMul(left.scalar, TensorProduct(left.expr, right))
+        if isinstance(right, ScalarMul):
+            return ScalarMul(right.scalar, TensorProduct(left, right.expr))
+        if left is not expr.left or right is not expr.right:
+            return TensorProduct(left, right)
+        return expr
+
+    if isinstance(expr, TensorSum):
+        new_l = pull_scalars(expr.left)
+        new_r = pull_scalars(expr.right)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+
+    if isinstance(expr, ScalarMul):
+        inner = pull_scalars(expr.expr)
+        if isinstance(inner, ScalarMul):
+            return ScalarMul(expr.scalar * inner.scalar, inner.expr)
+        if inner is not expr.expr:
+            return ScalarMul(expr.scalar, inner)
+        return expr
+
+    if isinstance(expr, PartialDeriv):
+        inner = pull_scalars(expr.expr)
+        if isinstance(inner, ScalarMul):
+            return ScalarMul(inner.scalar, PartialDeriv(inner.expr, expr.deriv_index))
+        if inner is not expr.expr:
+            return PartialDeriv(inner, expr.deriv_index)
+        return expr
+
+    if isinstance(expr, CovariantDeriv):
+        inner = pull_scalars(expr.expr)
+        if isinstance(inner, ScalarMul):
+            return ScalarMul(
+                inner.scalar,
+                type(expr)(inner.expr, expr.deriv_index, expr.connections),
+            )
+        if inner is not expr.expr:
+            return type(expr)(inner, expr.deriv_index, expr.connections)
+        return expr
+
+    return expr
+
+
+def _flatten_sum(expr: TensorExpr) -> list[TensorExpr]:
+    """``TensorSum`` 트리를 평탄한 summand 리스트로 변환."""
+    if isinstance(expr, TensorSum):
+        return _flatten_sum(expr.left) + _flatten_sum(expr.right)
+    return [expr]
+
+
+def _split_scalar(expr: TensorExpr) -> tuple:
+    """``ScalarMul(c, X)``  →  ``(c, X)``;  그 외  →  ``(1, expr)``."""
+    if isinstance(expr, ScalarMul):
+        return expr.scalar, expr.expr
+    return 1, expr
+
+
+def collect_scalar_terms(expr: TensorExpr) -> TensorExpr:
+    """``TensorSum`` 안에서 동일 canonical body의 summand를 묶어 scalar 합산.
+
+    - 합이 0인 group은 drop (전체 group들이 모두 cancel되면 ZeroTensor 반환).
+    - 합이 1이면 ScalarMul wrapping 없이 body만 반환.
+    - 그 외엔 ScalarMul(total, body)로 wrap.
+    - ``ScalarMul(c, TensorSum(...))`` 같은 nested 구조도 안쪽 sum까지 재귀.
+
+    ``pull_scalars``가 먼저 적용되어 있어야 효과적이다 (그래야 nested ScalarMul이
+    하나의 (scalar, body) 쌍으로 normalized).
+    """
+    # ScalarMul wrapping a TensorSum: 안으로 재귀
+    if isinstance(expr, ScalarMul):
+        inner = collect_scalar_terms(expr.expr)
+        if isinstance(inner, ZeroTensor):
+            return inner
+        if inner is not expr.expr:
+            return ScalarMul(expr.scalar, inner)
+        return expr
+
+    if not isinstance(expr, TensorSum):
+        return expr
+
+    summands = _flatten_sum(expr)
+
+    # body의 canonical form을 키로 group
+    groups: dict[tuple, list] = {}
+    for s in summands:
+        scalar, body = _split_scalar(s)
+        if isinstance(body, ZeroTensor):
+            continue  # 0 항 무시
+        key = canonical_form(body)
+        groups.setdefault(key, []).append((scalar, body))
+
+    new_summands: list[TensorExpr] = []
+    for key, items in groups.items():
+        total = sum(item[0] for item in items)
+        if total == 0:
+            continue  # 완전 cancel
+        body = items[0][1]  # representative
+        if total == 1:
+            new_summands.append(body)
+        else:
+            new_summands.append(ScalarMul(total, body))
+
+    if not new_summands:
+        return ZeroTensor(expr.free_indices)
+    if len(new_summands) == 1:
+        return new_summands[0]
+
+    result = new_summands[0]
+    for s in new_summands[1:]:
+        result = TensorSum(result, s)
+    return result
+
+
+# ─── simplify (top-level) ───────────────────────────────────
+
+
+def simplify(expr: TensorExpr) -> TensorExpr:
+    """모든 정규화 규칙을 fixed-point까지 적용한다.
+
+    적용 규칙 (M2.5 + M3):
+        - 재귀: TensorSum / ScalarMul / TensorProduct.
+        - is_zero_by_antisym_swap (M2: antisym × sym = 0).
+        - pull_scalars (M3: ScalarMul hoist).
+        - collect_scalar_terms (M3: TensorSum 같은 body 합산).
+        - ZeroTensor 흡수 (variation.py).
     """
     from indexcalc.core.variation import _simplify_zeros
 
@@ -287,6 +429,8 @@ def simplify(expr: TensorExpr) -> TensorExpr:
     while prev is not cur:
         prev = cur
         cur = _simplify_once(cur)
+        cur = pull_scalars(cur)
+        cur = collect_scalar_terms(cur)
         cur = _simplify_zeros(cur)
     return cur
 
