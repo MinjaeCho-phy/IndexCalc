@@ -1,0 +1,85 @@
+"""
+Substitution walk: TensorExpr 트리 전체에 generator 작용을 Leibniz로 적용.
+
+이 모듈은 ``core/variation.py``의 ``expand_variation``과 같은 패턴이지만,
+Leibniz 분배의 leaf 작용이 ``VariationRegistry``의 δ-prefixing 대신
+``Generator.apply_to``로 결정된다.
+
+주요 함수:
+- ``apply_generator(expr, generator)``: 트리 walk + Leibniz + leaf에서 generator 적용.
+
+ZeroTensor가 끼어드는 자리는 자동으로 정리된다 (``_simplify_zeros`` 재사용).
+"""
+
+from __future__ import annotations
+
+from indexcalc.core.tensor import (
+    Tensor, TensorExpr, TensorProduct, TensorSum, ScalarMul,
+)
+from indexcalc.core.deriv import PartialDeriv, CovariantDeriv
+from indexcalc.core.variation import ZeroTensor, _simplify_zeros
+from indexcalc.core.generator import Generator
+
+
+def apply_generator(expr: TensorExpr, generator: Generator) -> TensorExpr:
+    """Generator를 expr 트리 전체에 Leibniz로 적용한다.
+
+    규칙:
+        Tensor leaf:   generator.apply_to(leaf)
+        TensorSum:     apply_generator(left) + apply_generator(right)
+        TensorProduct: (δA)*B + A*(δB)
+        ScalarMul:     c * apply_generator(expr)
+        PartialDeriv:  ∂_μ(apply_generator(expr))   [global symmetry]
+        CovariantDeriv: ∇_μ(apply_generator(expr))  [기하 connection은 background]
+        ZeroTensor:    ZeroTensor (변하지 않음)
+
+    주의: gauge generator의 경우 $\\partial_\\mu$와의 commute 성립이 보장된다
+    (global, $x$-독립 변환). Local gauge transformation은 별도 generator로
+    표현해야 하며 본 walk 규칙으로는 부족하다 — M2 이후 다룸.
+    """
+    if isinstance(expr, ZeroTensor):
+        return expr
+
+    if isinstance(expr, Tensor):
+        return _simplify_zeros(generator.apply_to(expr))
+
+    if isinstance(expr, TensorSum):
+        return _simplify_zeros(
+            TensorSum(
+                apply_generator(expr.left, generator),
+                apply_generator(expr.right, generator),
+            )
+        )
+
+    if isinstance(expr, TensorProduct):
+        dA = apply_generator(expr.left, generator)
+        dB = apply_generator(expr.right, generator)
+        # Leibniz: 통계와 무관하게 (δA)·B + A·(δB).
+        # Fermion grading 부호는 leaf REORDERING에서 발생하지 변분 분배에서 안 생김.
+        return _simplify_zeros(
+            TensorSum(
+                TensorProduct(dA, expr.right),
+                TensorProduct(expr.left, dB),
+            )
+        )
+
+    if isinstance(expr, ScalarMul):
+        return _simplify_zeros(
+            ScalarMul(expr.scalar, apply_generator(expr.expr, generator))
+        )
+
+    if isinstance(expr, PartialDeriv):
+        inner = apply_generator(expr.expr, generator)
+        if isinstance(inner, ZeroTensor):
+            return ZeroTensor([expr.deriv_index] + inner.free_indices)
+        return PartialDeriv(inner, expr.deriv_index)
+
+    if isinstance(expr, CovariantDeriv):
+        inner = apply_generator(expr.expr, generator)
+        if isinstance(inner, ZeroTensor):
+            return ZeroTensor([expr.deriv_index] + inner.free_indices)
+        return type(expr)(inner, expr.deriv_index, expr.connections)
+
+    raise NotImplementedError(
+        f"apply_generator not implemented for {type(expr).__name__}"
+    )

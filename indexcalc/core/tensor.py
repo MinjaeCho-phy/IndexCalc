@@ -100,6 +100,9 @@ class Tensor(TensorExpr):
         name: str,
         indices: list[Index],
         antisymmetric_pairs: list[tuple[int, int]] | None = None,
+        *,
+        reps: dict[str, str] | None = None,
+        statistics: str = "bosonic",
     ):
         self.name = name
         self.indices = tuple(indices)
@@ -108,6 +111,13 @@ class Tensor(TensorExpr):
         self.antisymmetric_pairs: tuple[tuple[int, int], ...] = tuple(
             tuple(sorted(p)) for p in (antisymmetric_pairs or [])
         )
+        # reps: {group_name: rep_name}. 비어있으면 모든 그룹의 singlet으로 간주.
+        self.reps: dict[str, str] = dict(reps) if reps else {}
+        if statistics not in ("bosonic", "fermionic"):
+            raise ValueError(
+                f"statistics must be 'bosonic' or 'fermionic', got {statistics!r}"
+            )
+        self.statistics = statistics
 
     @property
     def free_indices(self) -> list[Index]:

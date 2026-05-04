@@ -19,6 +19,14 @@ from indexcalc.core.variation import (
     Variation, ZeroTensor, VariationRegistry, expand_variation,
 )
 from indexcalc.core.symmetry import canonicalize_antisym
+from indexcalc.core.group import Group, Representation, GroupRegistry
+from indexcalc.core.invariant_tensors import (
+    InvariantTensor, InvariantTensorRegistry,
+    standard_su_n_invariants, standard_u_n_invariants,
+    standard_lorentz_invariants,
+)
+from indexcalc.core.generator import Generator, u1_action, make_u1_generator
+from indexcalc.core.substitution import apply_generator
 from indexcalc.evaluate.component import evaluate
 from indexcalc.coordinates import Coordinates, parse_signature
 from indexcalc.curvature import Metric, CurvatureResult, SymbolicCurvatureResult
@@ -39,6 +47,12 @@ __all__ = [
     "SpatialCovariantDeriv", "spatial_covariant", "expand_spatial_covariant",
     "Variation", "ZeroTensor", "VariationRegistry", "expand_variation",
     "canonicalize_antisym",
+    "Group", "Representation", "GroupRegistry",
+    "InvariantTensor", "InvariantTensorRegistry",
+    "standard_su_n_invariants", "standard_u_n_invariants",
+    "standard_lorentz_invariants",
+    "Generator", "u1_action", "make_u1_generator",
+    "apply_generator",
     "evaluate",
     "Coordinates", "parse_signature",
     "Metric", "CurvatureResult", "SymbolicCurvatureResult",
