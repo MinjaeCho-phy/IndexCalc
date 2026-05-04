@@ -31,7 +31,8 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from indexcalc.core.group import Group, Representation
-from indexcalc.core.tensor import Tensor, TensorExpr, ScalarMul
+from indexcalc.core.index import Index, IndexSpace
+from indexcalc.core.tensor import Tensor, TensorExpr, TensorProduct, ScalarMul
 from indexcalc.core.variation import ZeroTensor
 
 
@@ -119,6 +120,130 @@ def u1_action(rep: Representation) -> ActionFn:
 
 
 # ─── Helper: register a Generator + standard U(1) actions ───────
+
+
+# ─── Helper: SU(N) adjoint action factory ───────────────────────
+
+
+def su_n_adj_action(
+    adj_space: IndexSpace,
+    parameter_name: str = "b",
+    structure_const_name: str = "f",
+) -> ActionFn:
+    """SU(N) adjoint rep 작용 factory:
+
+    .. math:: \\delta_b X^a = f^a{}_{bc} X^c
+
+    convention 메모:
+      - $f$의 첫 인덱스는 입력 field의 adj 인덱스 위치(upper/lower)를 따른다.
+      - 두 번째 ($b$, parameter)와 세 번째 ($c$, dummy)는 lower로 고정.
+      - $f$는 모든 인덱스 쌍에 antisymmetric (Cartan-Killing 정규화 $\\kappa = \\delta$ 가정).
+      - dummy 'c'는 $f$에서 lower, field에서 upper로 contract.
+
+    각 ``apply_to(field)`` 호출 시 dummy 이름은 충돌 회피용으로 fresh하게 발급.
+    parameter 이름은 generator 인스턴스에 대해 고정 (모든 leaf 변환에 같은 free 인덱스).
+
+    Parameters
+    ----------
+    adj_space : IndexSpace
+        adjoint 인덱스 공간.
+    parameter_name : str
+        generator parameter index의 이름 (예: ``"b"``). free index로 결과에 등장.
+    structure_const_name : str
+        구조 상수 텐서의 이름 (default ``"f"``).
+    """
+
+    def action(field: Tensor) -> TensorExpr:
+        adj_indices = [
+            (i, idx) for i, idx in enumerate(field.indices)
+            if idx.space == adj_space
+        ]
+        if len(adj_indices) != 1:
+            raise ValueError(
+                f"su_n_adj_action: field {field.name!r} expected to have exactly "
+                f"one index in {adj_space.name!r}, got {len(adj_indices)}"
+            )
+        slot, adj_idx = adj_indices[0]
+
+        # fresh dummy name 발급 (field의 기존 인덱스 + parameter 이름과 충돌 회피)
+        existing = {idx.name for idx in field.indices} | {parameter_name}
+        base = adj_space.indices[0] if adj_space.indices else "c"
+        dummy_name = base
+        n = 1
+        while dummy_name in existing:
+            dummy_name = f"{base}_{n}"
+            n += 1
+
+        # f tensor: [field's adj position, param lower, dummy lower]. all-pair antisymmetric.
+        f_first = Index(adj_idx.name, adj_space, adj_idx.position)
+        f_param = Index(parameter_name, adj_space, "lower")
+        f_dummy = Index(dummy_name, adj_space, "lower")
+        f_tensor = Tensor(
+            structure_const_name,
+            [f_first, f_param, f_dummy],
+            antisymmetric_pairs=[(0, 1), (0, 2), (1, 2)],
+        )
+
+        # field with adj index renamed adj_idx.name → dummy_name, position UPPER
+        # (contracts with f's third index which is lower)
+        new_indices = list(field.indices)
+        new_indices[slot] = Index(dummy_name, adj_space, "upper")
+        renamed_field = Tensor(
+            field.name,
+            new_indices,
+            antisymmetric_pairs=list(field.antisymmetric_pairs),
+            reps=field.reps,
+            statistics=field.statistics,
+        )
+
+        return TensorProduct(f_tensor, renamed_field)
+
+    return action
+
+
+def make_su_n_generator(
+    group: Group,
+    adj_space: IndexSpace,
+    parameter_name: str = "b",
+    structure_const_name: str = "f",
+    name: Optional[str] = None,
+) -> Generator:
+    """SU(N) Group에 등록된 adj/singlet rep에 대한 표준 generator를 만든다.
+
+    fund rep은 별도 representation matrix 텐서 처리가 필요하므로 v1에선 미등록 —
+    fund field에 작용하면 ``ValueError`` 발생 (M3에서 spinor와 함께 추가 예정).
+
+    Examples
+    --------
+    >>> from indexcalc.core.index import IndexSpace
+    >>> from indexcalc.core.group import Group
+    >>> sun = Group("SU(3)", dim=8, abelian=False)
+    >>> sun.add_rep("adj", dim=8)
+    >>> sun.add_rep("singlet", dim=1)
+    >>> adj = IndexSpace("su3_adj", dim=8, indices="abcdefgh")
+    >>> g = make_su_n_generator(sun, adj)
+    >>> g.has_action("adj") and g.has_action("singlet")
+    True
+    """
+    if group.abelian:
+        raise ValueError(
+            f"make_su_n_generator requires non-abelian group, got {group.name!r}"
+        )
+    gen = Generator(name or f"T_{group.name}", group)
+
+    if group.has_rep("adj"):
+        gen.declare_action(
+            "adj",
+            su_n_adj_action(
+                adj_space, parameter_name=parameter_name,
+                structure_const_name=structure_const_name,
+            ),
+        )
+    if group.has_rep("singlet"):
+        # singlet field에 대한 작용: 0 (ZeroTensor)
+        gen.declare_action("singlet", lambda field: ZeroTensor(field.free_indices))
+
+    return gen
 
 
 def make_u1_generator(group: Group, name: Optional[str] = None) -> Generator:

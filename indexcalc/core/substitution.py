@@ -56,6 +56,13 @@ def apply_generator(expr: TensorExpr, generator: Generator) -> TensorExpr:
         dB = apply_generator(expr.right, generator)
         # Leibniz: 통계와 무관하게 (δA)·B + A·(δB).
         # Fermion grading 부호는 leaf REORDERING에서 발생하지 변분 분배에서 안 생김.
+        # ZeroTensor 분기 — TensorSum이 free index 개수 불일치로 실패하기 전에 조기 처리.
+        if isinstance(dA, ZeroTensor) and isinstance(dB, ZeroTensor):
+            return ZeroTensor(expr.free_indices)
+        if isinstance(dA, ZeroTensor):
+            return _simplify_zeros(TensorProduct(expr.left, dB))
+        if isinstance(dB, ZeroTensor):
+            return _simplify_zeros(TensorProduct(dA, expr.right))
         return _simplify_zeros(
             TensorSum(
                 TensorProduct(dA, expr.right),
