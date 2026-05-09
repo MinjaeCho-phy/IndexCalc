@@ -444,6 +444,323 @@ def pull_scalars(expr: TensorExpr) -> TensorExpr:
     return expr
 
 
+def _is_dynamic_field(expr: TensorExpr) -> bool:
+    """``expr``가 dynamic field (= 위치 의존적)을 포함하면 True.
+
+    Heuristic: a leaf ``Tensor`` is dynamic iff its ``reps`` dict is non-empty.
+    그룹 invariant tensor (η, δ, f, γ, Σ, M_vec 등)는 ``reps={}``로 둔 IR
+    convention을 따르므로 *constant* 로 판정.
+    """
+    if isinstance(expr, Tensor):
+        return bool(expr.reps)
+    if isinstance(expr, ZeroTensor):
+        return False
+    if isinstance(expr, ScalarMul):
+        return _is_dynamic_field(expr.expr)
+    if isinstance(expr, (TensorProduct, TensorSum)):
+        return _is_dynamic_field(expr.left) or _is_dynamic_field(expr.right)
+    if isinstance(expr, (PartialDeriv, CovariantDeriv)):
+        return _is_dynamic_field(expr.expr)
+    return False
+
+
+def commute_partial_through_constants(expr: TensorExpr) -> TensorExpr:
+    """``PartialDeriv``를 *constant* (= dynamic field 아님) factor 밖으로 pull-out.
+
+    .. math::
+        \\partial_\\mu (C \\cdot \\psi) \\to C \\cdot \\partial_\\mu \\psi
+        \\qquad \\text{if $C$ is constant (e.g. $\\Sigma^{ab}$, $\\gamma^a$, $T^a$)}
+
+    Σ, T, f, γ 같은 group-theoretic 텐서는 IR convention 상 ``reps={}`` 로
+    표현되므로 dynamic이 아니다 — spacetime 미분 밖으로 빠진다. 반대로
+    ψ, V, A, H 같은 dynamic field는 그대로 ∂ 안에 머문다.
+
+    Notes
+    -----
+    Index space 기준이 아니라 ``reps`` 기준 — Σ^{ab} 가 frame 인덱스를
+    갖더라도 (frame == spacetime인 setup에서) constant 판정.
+    """
+    if isinstance(expr, PartialDeriv):
+        inner = commute_partial_through_constants(expr.expr)
+        if isinstance(inner, TensorProduct):
+            left = inner.left
+            right = inner.right
+            left_dyn = _is_dynamic_field(left)
+            right_dyn = _is_dynamic_field(right)
+            if not left_dyn and right_dyn:
+                return TensorProduct(
+                    left,
+                    commute_partial_through_constants(
+                        PartialDeriv(right, expr.deriv_index)
+                    ),
+                )
+            if left_dyn and not right_dyn:
+                return TensorProduct(
+                    commute_partial_through_constants(
+                        PartialDeriv(left, expr.deriv_index)
+                    ),
+                    right,
+                )
+            # Both dynamic or both constant: leave Leibniz alone
+            if inner is not expr.expr:
+                return PartialDeriv(inner, expr.deriv_index)
+            return expr
+        if inner is not expr.expr:
+            return PartialDeriv(inner, expr.deriv_index)
+        return expr
+
+    if isinstance(expr, TensorProduct):
+        new_l = commute_partial_through_constants(expr.left)
+        new_r = commute_partial_through_constants(expr.right)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorProduct(new_l, new_r)
+        return expr
+
+    if isinstance(expr, TensorSum):
+        new_l = commute_partial_through_constants(expr.left)
+        new_r = commute_partial_through_constants(expr.right)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+
+    if isinstance(expr, ScalarMul):
+        new_inner = commute_partial_through_constants(expr.expr)
+        if new_inner is not expr.expr:
+            return ScalarMul(expr.scalar, new_inner)
+        return expr
+
+    return expr
+
+
+def _find_sigma_gamma_pair(
+    factors: list[TensorExpr],
+    sigma_name: str,
+    gamma_name: str,
+) -> tuple[int, int] | None:
+    """factor 리스트에서 Σ.col ↔ γ.row 가 spinor dummy로 contract된 쌍을 찾는다.
+
+    Σ convention: slots = (a↑frame, b↑frame, row↑spinor, col↓spinor), 4 indices.
+    γ convention: slots = (μ↑frame, row↑spinor, col↓spinor), 3 indices.
+
+    Σ.col (slot 3, lower) 의 name 이 γ.row (slot 1, upper) 의 name 과 같고
+    같은 IndexSpace 면 contraction 으로 본다. 못 찾으면 ``None``.
+    """
+    for i, fi in enumerate(factors):
+        if not (
+            isinstance(fi, Tensor)
+            and fi.name == sigma_name
+            and len(fi.indices) == 4
+        ):
+            continue
+        sigma_col = fi.indices[3]
+        if sigma_col.position != "lower":
+            continue
+        for j, fj in enumerate(factors):
+            if i == j:
+                continue
+            if not (
+                isinstance(fj, Tensor)
+                and fj.name == gamma_name
+                and len(fj.indices) == 3
+            ):
+                continue
+            gamma_row = fj.indices[1]
+            if gamma_row.position != "upper":
+                continue
+            if (
+                gamma_row.name == sigma_col.name
+                and gamma_row.space == sigma_col.space
+            ):
+                return (i, j)
+    return None
+
+
+def _build_sigma_gamma_swap(
+    factors: list[TensorExpr],
+    i_sigma: int,
+    j_gamma: int,
+) -> list[TensorExpr]:
+    """[Σ,γ] identity 의 첫째 term: γ·Σ swapped ordering.
+
+    Original: ψ̄.col → Σ.row(slot2); Σ.col(slot3) ↔ γ.row(slot1); γ.col(slot2) → ∂ψ.
+    Swap:     ψ̄.col → γ.row(slot1); γ.col(slot2) ↔ Σ.row(slot2); Σ.col(slot3) → ∂ψ.
+
+    γ.row name = ψ̄'s contraction name (was Σ.row name);
+    γ.col name = NEW dummy Y;
+    Σ.row name = Y;
+    Σ.col name = ∂ψ's contraction name (was γ.col name).
+    """
+    sigma = factors[i_sigma]
+    gamma = factors[j_gamma]
+    sigma_row_name = sigma.indices[2].name
+    sigma_col_name = sigma.indices[3].name
+    gamma_row_name = gamma.indices[1].name
+    gamma_col_name = gamma.indices[2].name
+    spinor_space = sigma.indices[2].space
+
+    new_dummy = _fresh_swap_dummy()
+
+    new_gamma = Tensor(
+        gamma.name,
+        [
+            gamma.indices[0],
+            Index(sigma_row_name, spinor_space, "upper"),
+            Index(new_dummy, spinor_space, "lower"),
+        ],
+        antisymmetric_pairs=list(gamma.antisymmetric_pairs),
+        reps=dict(gamma.reps),
+        statistics=gamma.statistics,
+    )
+    new_sigma = Tensor(
+        sigma.name,
+        [
+            sigma.indices[0],
+            sigma.indices[1],
+            Index(new_dummy, spinor_space, "upper"),
+            Index(gamma_col_name, spinor_space, "lower"),
+        ],
+        antisymmetric_pairs=list(sigma.antisymmetric_pairs),
+        reps=dict(sigma.reps),
+        statistics=sigma.statistics,
+    )
+
+    new_factors = list(factors)
+    new_factors[i_sigma] = new_sigma
+    new_factors[j_gamma] = new_gamma
+    return new_factors
+
+
+def _build_m_vec_gamma_collapse(
+    factors: list[TensorExpr],
+    i_sigma: int,
+    j_gamma: int,
+    m_vec_name: str,
+) -> list[TensorExpr]:
+    """[Σ,γ] identity 의 둘째 term: $-2i \\cdot (M^{ab})^c{}_d \\gamma^d$.
+
+    Σ 제거, γ 의 vector 인덱스를 dummy로 바꾸고 그 자리에 M_vec contraction 추가.
+    M_vec.row(slot 2, ↑frame) = 원 γ의 vector 인덱스 c name (free index, 외부 chain
+    유지);  M_vec.col(slot 3, ↓frame) = NEW dummy Z;  γ_new.vector(slot 0, ↑frame)
+    = Z (M_vec와 contract).
+
+    spinor row/col 은 γ original 그대로 — Σ가 사라지면서 그 spinor 연결이 ψ̄·γ_new
+    로 직접 이어진다 (γ_new의 row 가 원래 Σ의 row name = ψ̄ contraction name).
+    """
+    sigma = factors[i_sigma]
+    gamma = factors[j_gamma]
+    sigma_row_name = sigma.indices[2].name  # → ψ̄'s contraction
+    gamma_vec = gamma.indices[0]            # frame upper, e.g. μ
+    gamma_col_name = gamma.indices[2].name  # → ∂ψ's contraction
+    spinor_space = sigma.indices[2].space
+    frame_space = sigma.indices[0].space
+
+    new_dummy = _fresh_swap_dummy()
+
+    new_gamma = Tensor(
+        gamma.name,
+        [
+            Index(new_dummy, frame_space, "upper"),  # vector → contracts with M_vec.col
+            Index(sigma_row_name, spinor_space, "upper"),  # row → ψ̄
+            Index(gamma_col_name, spinor_space, "lower"),  # col → ∂ψ
+        ],
+        antisymmetric_pairs=list(gamma.antisymmetric_pairs),
+        reps=dict(gamma.reps),
+        statistics=gamma.statistics,
+    )
+    M_vec = Tensor(
+        m_vec_name,
+        [
+            sigma.indices[0],  # a↑ (Lorentz parameter from Σ)
+            sigma.indices[1],  # b↑
+            Index(gamma_vec.name, frame_space, "upper"),  # c↑ — original γ vector index
+            Index(new_dummy, frame_space, "lower"),       # d↓ — contracts with γ_new vector
+        ],
+        antisymmetric_pairs=[(0, 1)],
+    )
+
+    new_factors = [
+        f for k, f in enumerate(factors)
+        if k != i_sigma and k != j_gamma
+    ]
+    new_factors.extend([M_vec, new_gamma])
+    return new_factors
+
+
+# Fresh-dummy counter for Clifford rewriter (separate prefix from generator's _act).
+import itertools as _itertools_clifford
+_clifford_dummy_counter = _itertools_clifford.count()
+
+
+def _fresh_swap_dummy(base: str = "_clf") -> str:
+    return f"{base}{next(_clifford_dummy_counter)}"
+
+
+def apply_clifford_sigma_gamma(
+    expr: TensorExpr,
+    sigma_name: str = "Sigma",
+    gamma_name: str = "gamma",
+    m_vec_name: str = "M_vec",
+) -> TensorExpr:
+    """Forward rewrite of $[\\Sigma^{ab}, \\gamma^c]$ using Clifford identity.
+
+    .. math::
+        \\Sigma^{ab,\\alpha}{}_\\beta\\, \\gamma^{c,\\beta}{}_\\delta
+        \\;\\to\\;
+        \\gamma^{c,\\alpha}{}_\\beta\\, \\Sigma^{ab,\\beta}{}_\\delta
+        + (-2i)\\, (M^{ab})^c{}_d\\, \\gamma^{d,\\alpha}{}_\\delta
+
+    M4 IR convention 에 맞춘 coefficient $-2i$. 외부 factor (ψ̄, ∂ψ, scalar 등)
+    는 그대로 유지되며, Σ-γ 페어가 차지하던 두 자리를 위 두 결과 term 으로 분기.
+
+    한 번에 한 쌍만 처리 — 더 많은 Σ-γ 쌍이 있으면 fixed-point loop 에서 추가 호출.
+    """
+    if isinstance(expr, TensorSum):
+        new_l = apply_clifford_sigma_gamma(expr.left, sigma_name, gamma_name, m_vec_name)
+        new_r = apply_clifford_sigma_gamma(expr.right, sigma_name, gamma_name, m_vec_name)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+
+    if isinstance(expr, ScalarMul):
+        new_inner = apply_clifford_sigma_gamma(expr.expr, sigma_name, gamma_name, m_vec_name)
+        if isinstance(new_inner, TensorSum):
+            return TensorSum(
+                ScalarMul(expr.scalar, new_inner.left),
+                ScalarMul(expr.scalar, new_inner.right),
+            )
+        if new_inner is not expr.expr:
+            return ScalarMul(expr.scalar, new_inner)
+        return expr
+
+    if not isinstance(expr, TensorProduct):
+        return expr
+
+    factors = collect_factors(expr)
+    pair = _find_sigma_gamma_pair(factors, sigma_name, gamma_name)
+    if pair is None:
+        # No pattern; recurse into substructure (rarely needed since
+        # collect_factors flattens, but PartialDeriv internals stay nested).
+        new_l = apply_clifford_sigma_gamma(expr.left, sigma_name, gamma_name, m_vec_name)
+        new_r = apply_clifford_sigma_gamma(expr.right, sigma_name, gamma_name, m_vec_name)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorProduct(new_l, new_r)
+        return expr
+
+    i_sigma, j_gamma = pair
+
+    # Term 1: γ-Σ swap (factor multiset commutes; rebuild left-associated).
+    swap_factors = _build_sigma_gamma_swap(factors, i_sigma, j_gamma)
+    term1 = _product_of_factors(swap_factors)
+
+    # Term 2: -2i · M_vec · γ (Σ removed, γ rebuilt with vector contraction).
+    collapse_factors = _build_m_vec_gamma_collapse(
+        factors, i_sigma, j_gamma, m_vec_name
+    )
+    term2 = ScalarMul(-2j, _product_of_factors(collapse_factors))
+
+    return TensorSum(term1, term2)
+
+
 def _flatten_sum(expr: TensorExpr) -> list[TensorExpr]:
     """``TensorSum`` 트리를 평탄한 summand 리스트로 변환."""
     if isinstance(expr, TensorSum):
@@ -555,6 +872,7 @@ def simplify(expr: TensorExpr) -> TensorExpr:
         cur = _simplify_once(cur)
         cur = distribute_products(cur)
         cur = pull_scalars(cur)
+        cur = commute_partial_through_constants(cur)
         cur = collect_scalar_terms(cur)
         cur = _simplify_zeros(cur)
         if cur is prev:

@@ -72,6 +72,11 @@ class Generator:
         self.name = name
         self.group = group
         self._actions: dict[str, ActionFn] = {}
+        # Optional: action on PartialDeriv's free index ($\partial_\mu$). Lorentz
+        # transformations rotate the deriv_index as a vector even though no
+        # explicit Tensor leaf carries it. Other generators (gauge U(1)/SU(N))
+        # leave it alone.
+        self._deriv_index_action: Optional[Callable] = None
 
     def declare_action(self, rep_name: str, action: ActionFn) -> None:
         """rep ``rep_name``의 field에 대한 작용을 등록한다."""
@@ -83,6 +88,21 @@ class Generator:
 
     def has_action(self, rep_name: str) -> bool:
         return rep_name in self._actions
+
+    def declare_deriv_index_action(self, action: Callable) -> None:
+        """``PartialDeriv.deriv_index``를 회전시키는 작용을 등록한다.
+
+        ``action(pd: PartialDeriv) -> TensorExpr`` 형태. Lorentz vector 회전이
+        대표 use case. 미등록이면 ``apply_generator``는 deriv_index 회전 항을
+        생성하지 않는다 (global gauge default).
+        """
+        self._deriv_index_action = action
+
+    def apply_to_deriv_index(self, pd) -> Optional["TensorExpr"]:
+        """등록된 deriv_index_action 호출. 없으면 ``None``."""
+        if self._deriv_index_action is None:
+            return None
+        return self._deriv_index_action(pd)
 
     def apply_to(self, field: Tensor) -> TensorExpr:
         """단일 field에 generator를 적용한다.
@@ -467,6 +487,50 @@ def lorentz_vector_action(
     return action
 
 
+def lorentz_deriv_index_action(
+    frame_space: IndexSpace,
+    parameter_names: tuple = ("a", "b"),
+    generator_name: str = "M_vec",
+):
+    """Lorentz 변환의 ``PartialDeriv`` index에 대한 vector 회전 작용.
+
+    Convention (lower position only — ``PartialDeriv.deriv_index`` 는 항상 lower):
+
+        $\\delta\\partial_\\mu T = -\\partial_\\nu T \\cdot (M^{ab})^\\nu{}_\\mu$
+
+    즉 ``δV_μ`` 와 동일 형태. Lorentz 파라미터 $(a, b)$ 는 결과의 free index로
+    살아남는다.
+
+    Returns
+    -------
+    Callable[[PartialDeriv], TensorExpr]
+        ``Generator.declare_deriv_index_action`` 에 등록 가능한 함수.
+    """
+    a_name, b_name = parameter_names
+
+    def action(pd) -> TensorExpr:
+        from indexcalc.core.deriv import PartialDeriv
+
+        d_idx = pd.deriv_index
+        if d_idx.space != frame_space:
+            return ZeroTensor([d_idx] + pd.expr.free_indices)
+        dummy = _fresh_dummy_name()
+        new_pd = PartialDeriv(pd.expr, Index(dummy, frame_space, "lower"))
+        M = Tensor(
+            generator_name,
+            [
+                Index(a_name, frame_space, "upper"),
+                Index(b_name, frame_space, "upper"),
+                Index(dummy, frame_space, "upper"),
+                Index(d_idx.name, frame_space, "lower"),
+            ],
+            antisymmetric_pairs=[(0, 1)],
+        )
+        return ScalarMul(-1.0, TensorProduct(new_pd, M))
+
+    return action
+
+
 def make_lorentz_spinor_generator(
     group: Group,
     frame_space: IndexSpace,
@@ -509,6 +573,11 @@ def make_lorentz_spinor_generator(
         gen.declare_action("vector", vector_act)
     if group.has_rep("singlet"):
         gen.declare_action("singlet", lambda f: ZeroTensor(f.free_indices))
+    # PartialDeriv의 deriv_index 회전: vector rep 가용시 자동 등록
+    if group.has_rep("vector"):
+        gen.declare_deriv_index_action(
+            lorentz_deriv_index_action(frame_space, parameter_names),
+        )
     return gen
 
 

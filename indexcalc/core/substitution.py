@@ -83,8 +83,22 @@ def apply_generator(expr: TensorExpr, generator: Generator) -> TensorExpr:
     if isinstance(expr, PartialDeriv):
         inner = apply_generator(expr.expr, generator)
         if isinstance(inner, ZeroTensor):
-            return ZeroTensor([expr.deriv_index] + inner.free_indices)
-        return PartialDeriv(inner, expr.deriv_index)
+            inner_term: TensorExpr = ZeroTensor(
+                [expr.deriv_index] + inner.free_indices
+            )
+        else:
+            inner_term = PartialDeriv(inner, expr.deriv_index)
+
+        # Vector-rep rotation of the deriv_index itself (Lorentz only).
+        # Other generators leave deriv_index alone.
+        deriv_term = generator.apply_to_deriv_index(expr)
+        if deriv_term is None:
+            return _simplify_zeros(inner_term)
+        if isinstance(deriv_term, ZeroTensor):
+            return _simplify_zeros(inner_term)
+        if isinstance(inner_term, ZeroTensor):
+            return _simplify_zeros(deriv_term)
+        return _simplify_zeros(TensorSum(inner_term, deriv_term))
 
     if isinstance(expr, CovariantDeriv):
         inner = apply_generator(expr.expr, generator)
