@@ -27,8 +27,10 @@ from indexcalc import (
     IndexSpace, IndexRegistry, MetricRegistry,
     Tensor, LeviCivitaConnection,
     Variation, VariationRegistry, expand_variation,
-    PartialDeriv, partial, TensorProduct, TensorSum, ScalarMul,
+    PartialDeriv, partial, partial_to_covariant,
+    TensorProduct, TensorSum, ScalarMul,
     Sym, Antisym, TraceFreeSym, expand_symmetrization,
+    ZeroTensor,
     to_latex,
 )
 from indexcalc.core.index import Index
@@ -373,12 +375,153 @@ print("    Antisym node   :", to_latex(antisym_c))
 print("    expanded       :", to_latex(expand_symmetrization(antisym_c)))
 
 print()
+print("━━━ G5 demo: 텐서 속성 기반 simplification (2026-05-11 추가) ━━━")
+from indexcalc.core.simplify import (
+    is_zero_by_traceless_metric,
+    is_zero_by_transverse_deriv,
+    is_zero_by_antisym_swap,
+    simplify,
+)
+
+# (a) γ^{ij} · h^{TT}_{ij} → 0  (traceless × metric)
+print("\n  (a) γ^{ij} h^{TT}_{ij}  (traceless × metric)")
+i_lo2, j_lo2 = sp_.lower("i"), sp_.lower("j")
+i_up2, j_up2 = sp_.upper("i"), sp_.upper("j")
+γ_inv_ij = Tensor("γ", [i_up2, j_up2], symmetric_pairs=[(0, 1)])
+hTT2 = Tensor(
+    "hTT", [i_lo2, j_lo2],
+    symmetric_pairs=[(0, 1)],
+    traceless=[(0, 1)],
+    transverse=[0, 1],
+)
+expr_a = TensorProduct(γ_inv_ij, hTT2)
+print(f"    raw       : {to_latex(expr_a)}")
+result_a = is_zero_by_traceless_metric(expr_a, mreg)
+print(f"    simplified: {to_latex(result_a)}    [✓ ZeroTensor]"
+      if isinstance(result_a, ZeroTensor) else
+      f"    simplified: {to_latex(result_a)}    [✗ not detected]")
+
+# (b) γ^{ij} ∂_i BV_j → 0  (transverse × ∂ via metric)
+print("\n  (b) γ^{ij} ∂_i BV_j  (transverse × ∂ via metric)")
+BV2 = Tensor("BV", [j_lo2], transverse=[0])
+deriv_b = PartialDeriv(BV2, i_lo2)
+expr_b = TensorProduct(γ_inv_ij, deriv_b)
+print(f"    raw       : {to_latex(expr_b)}")
+result_b = is_zero_by_transverse_deriv(expr_b, mreg)
+print(f"    simplified: {to_latex(result_b)}    [✓ ZeroTensor]"
+      if isinstance(result_b, ZeroTensor) else
+      f"    simplified: {to_latex(result_b)}    [✗ not detected]")
+
+# (c) A_{[ab]} S^{ab} → 0  (antisym pair × symmetric_pairs slot)
+print("\n  (c) A_{[ab]} S^{ab}  (antisym × symmetric_pairs slot)")
+adj = IndexSpace("adj", dim=8, indices="abcdefgh")
+a_lo, b_lo = adj.lower("a"), adj.lower("b")
+a_up, b_up = adj.upper("a"), adj.upper("b")
+A2 = Tensor("A", [a_lo, b_lo], antisymmetric_pairs=[(0, 1)])
+S2 = Tensor("S", [a_up, b_up], symmetric_pairs=[(0, 1)])
+expr_c = TensorProduct(A2, S2)
+print(f"    raw       : {to_latex(expr_c)}")
+result_c = is_zero_by_antisym_swap(expr_c)
+print(f"    simplified: {to_latex(result_c)}    [✓ ZeroTensor]"
+      if isinstance(result_c, ZeroTensor) else
+      f"    simplified: {to_latex(result_c)}    [✗ not detected]")
+
+print()
+print("━━━ G7 demo: ∂_μ T → ∇̄_μ T - Σ Γ̄·T forward 변환 (2026-05-11 추가) ━━━")
+# (a) Simple ∂_μ T^ρ_σ
+print("\n  (a) ∂_μ T^ρ_σ  (mixed slots)")
+T_demo = Tensor("T", [Index("ρ", st, "upper"), Index("σ", st, "lower")])
+expr_g7a = PartialDeriv(T_demo, Index("μ", st, "lower"))
+print(f"    raw       : {to_latex(expr_g7a)}")
+out_g7a = partial_to_covariant(expr_g7a, conn_st)
+print(f"    expanded  : {to_latex(out_g7a)}")
+
+# (b) δg를 ∂에서 ∇̄ form으로 정리 (Palatini 응용)
+print("\n  (b) ∂_ν δg_{ρσ}  (textbook covariant form 진입)")
+δg = Tensor("δg", [Index("ρ", st, "lower"), Index("σ", st, "lower")],
+            symmetric_pairs=[(0, 1)])
+expr_g7b = PartialDeriv(δg, Index("ν", st, "lower"))
+print(f"    raw       : {to_latex(expr_g7b)}")
+out_g7b = partial_to_covariant(expr_g7b, conn_st)
+print(f"    expanded  : {to_latex(out_g7b)}")
+
+# (c) cancellation: ∂_μ T - ∂_μ T → 0
+from indexcalc.core.simplify import simplify
+print("\n  (c) Cancellation: ∂_μ T - ∂_μ T  (partial_to_covariant + simplify → 0)")
+T_c = Tensor("T", [Index("ρ", st, "upper")])
+expr_g7c = TensorSum(
+    PartialDeriv(T_c, Index("μ", st, "lower")),
+    ScalarMul(-1, PartialDeriv(T_c, Index("μ", st, "lower"))),
+)
+print(f"    raw       : {to_latex(expr_g7c)}")
+out_g7c = partial_to_covariant(expr_g7c, conn_st)
+result_g7c = simplify(out_g7c)
+print(f"    final     : {to_latex(result_g7c)}    [{type(result_g7c).__name__}]")
+
+print()
+print("━━━ G6 demo: δg^{μν} → −g^{μρ}g^{νσ}δg_{ρσ} 자동 치환 (2026-05-11 추가) ━━━")
+# (a) inverse metric variation alone
+print("\n  (a) δ(g^{ρσ})  with mreg")
+g_up_demo = Tensor("g", [Index("ρ", st, "upper"), Index("σ", st, "upper")])
+vreg_g6 = VariationRegistry()
+vreg_g6.declare_varying("g")
+expanded_a = expand_variation(Variation(g_up_demo), vreg_g6, mreg)
+print(f"    raw       : δ({to_latex(g_up_demo)})")
+print(f"    auto-expand: {to_latex(expanded_a)}")
+
+# (b) δ(g^μν · R_μν) — Leibniz 안에서도 mreg 전파
+print("\n  (b) δ(g^{μν} R_{μν})  Leibniz + auto-expand")
+R_demo = Tensor("R", [Index("μ", st, "lower"), Index("ν", st, "lower")])
+g_up_b = Tensor("g", [Index("μ", st, "upper"), Index("ν", st, "upper")])
+vreg_g6b = VariationRegistry()
+vreg_g6b.declare_varying("g")
+vreg_g6b.declare_varying("R")
+prod_b = TensorProduct(g_up_b, R_demo)
+expanded_b = expand_variation(Variation(prod_b), vreg_g6b, mreg)
+print(f"    raw       : δ({to_latex(prod_b)})")
+print(f"    auto-expand: {to_latex(expanded_b)}")
+
+# (c) background metric → 0
+print("\n  (c) δ(g^{ρσ})  with g declared background (δg=0) → ZeroTensor")
+vreg_g6c = VariationRegistry()
+vreg_g6c.declare_background("g")
+expanded_c = expand_variation(Variation(g_up_demo), vreg_g6c, mreg)
+print(f"    auto-expand: {to_latex(expanded_c)}    [{type(expanded_c).__name__}]")
+
+print()
+print("━━━ G8 demo: free_indices의 Einstein 자동 contraction (2026-05-11 추가) ━━━")
+# (a) Tensor self-contract: Γ^ρ_ρλ → free=[λ]
+ρU2 = Index("ρ", st, "upper")
+ρL2 = Index("ρ", st, "lower")
+λL2 = Index("λ", st, "lower")
+Γ_self = Tensor("Γ", [ρU2, ρL2, λL2])
+print(f"\n  (a) Tensor self-contract")
+print(f"     Γ^ρ_ρλ.indices      = {[i.name for i in Γ_self.indices]} (3개, 원본 보존)")
+print(f"     Γ^ρ_ρλ.free_indices = {[i.name for i in Γ_self.free_indices]} ({Γ_self.rank}: λ만 free)")
+
+# (b) PartialDeriv contracts deriv_index with inner free
+νL2 = Index("ν", st, "lower")
+σL2 = Index("σ", st, "lower")
+Γ_νσ = Tensor("Γ", [Index("ρ", st, "upper"), νL2, σL2])
+d_Γ = PartialDeriv(Γ_νσ, ρL2)
+print(f"\n  (b) PartialDeriv ↔ inner contract")
+print(f"     ∂_ρ Γ^ρ_νσ.free = {[i.name for i in d_Γ.free_indices]} (정상: ν, σ)")
+
+print()
 print("미해결 갭 (다음 작업 후보)")
 print("  G4. ✓ 완료 (n=2 swap, prefix LaTeX, expand 함수)")
-print("  G5. Simplification 규칙")
-print("      • γ^ij · hTT_ij        → 0")
-print("      • D^i · BV_i           → 0")
-print("      • antisym × sym (slot) → 0")
-print("  G6. δg^{μν} ↔ -g^{μρ}g^{νσ}δg_{ρσ} 자동 치환")
-print("  G7. Palatini covariant form collapse (∂ → ∇̄ + Γ̄·δg 정리)")
-print("  G8. PartialDeriv의 cross-level trace 인식 (∂_ρ T^ρ_νσ)")
+print("  G5. ✓ 완료 2026-05-11")
+print("      • γ^{ij} · h^{TT}_{ij}     → 0  (is_zero_by_traceless_metric)")
+print("      • ∂^i BV_i / γ^{ij}∂_iBV_j → 0  (is_zero_by_transverse_deriv)")
+print("      • antisym × sym (slot)     → 0  (is_zero_by_antisym_swap 확장)")
+print("  G8. ✓ 완료 2026-05-11")
+print("      • Tensor.free_indices가 self-pair (Γ^ρ_ρλ) 자동 contract")
+print("      • PartialDeriv/CovariantDeriv의 deriv_index도 inner와 자동 contract")
+print("      • Step 5 Ricci tensor 직접 구성 가능, Step 6 δR_μν 전개 OK")
+print("  G6. ✓ 완료 2026-05-11")
+print("      • δg^{μν} → −g^{μρ}g^{νσ}δg_{ρσ} 자동 (mreg 전달 시)")
+print("      • Leibniz 재귀에서 mreg 전파; background metric은 ZeroTensor로 cleanup")
+print("  G7. ✓ 완료 2026-05-11 (forward 변환 + simplify cleanup)")
+print("      • partial_to_covariant: ∂_μ T → ∇̄_μ T - Σ Γ̄·T (slot별 보정)")
+print("      • Tensor 속성 보존, only_for로 leaf 선택 가능")
+print("      • Backward collapse(∂ + Γ̄ → ∇̄ pattern matching)는 후속 작업")
