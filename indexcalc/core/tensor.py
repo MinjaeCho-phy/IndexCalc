@@ -101,6 +101,9 @@ class Tensor(TensorExpr):
         indices: list[Index],
         antisymmetric_pairs: list[tuple[int, int]] | None = None,
         *,
+        symmetric_pairs: list[tuple[int, int]] | None = None,
+        traceless: list[tuple[int, int]] | None = None,
+        transverse: list[int] | None = None,
         reps: dict[str, str] | None = None,
         statistics: str = "bosonic",
     ):
@@ -111,6 +114,45 @@ class Tensor(TensorExpr):
         self.antisymmetric_pairs: tuple[tuple[int, int], ...] = tuple(
             tuple(sorted(p)) for p in (antisymmetric_pairs or [])
         )
+        # symmetric_pairs: 서로 바꿔도 그대로인 slot 쌍 목록. 예: g_μν = g_νμ
+        self.symmetric_pairs: tuple[tuple[int, int], ...] = tuple(
+            tuple(sorted(p)) for p in (symmetric_pairs or [])
+        )
+        # traceless: γ^ij T_ij = 0 이 성립하는 slot 쌍 목록.
+        #   typically symmetric_pairs 안의 쌍과 일치.
+        self.traceless: tuple[tuple[int, int], ...] = tuple(
+            tuple(sorted(p)) for p in (traceless or [])
+        )
+        # transverse: ∂^i T_..i.. = 0 이 성립하는 slot 인덱스 목록.
+        self.transverse: tuple[int, ...] = tuple(transverse or [])
+
+        # ── validation ──────────────────────────────────────
+        n = len(self.indices)
+        seen_pairs: set[tuple[int, int]] = set()
+        for p in self.antisymmetric_pairs:
+            if p[0] == p[1] or p[0] < 0 or p[1] >= n:
+                raise ValueError(f"invalid antisymmetric_pair {p} for rank {n}")
+            seen_pairs.add(p)
+        for p in self.symmetric_pairs:
+            if p[0] == p[1] or p[0] < 0 or p[1] >= n:
+                raise ValueError(f"invalid symmetric_pair {p} for rank {n}")
+            if p in seen_pairs:
+                raise ValueError(
+                    f"slot pair {p} is both symmetric and antisymmetric"
+                )
+            seen_pairs.add(p)
+        for p in self.traceless:
+            if p[0] == p[1] or p[0] < 0 or p[1] >= n:
+                raise ValueError(f"invalid traceless pair {p} for rank {n}")
+            # traceless slot 쌍의 두 인덱스는 같은 IndexSpace여야 함.
+            if self.indices[p[0]].space != self.indices[p[1]].space:
+                raise ValueError(
+                    f"traceless pair {p} crosses different IndexSpaces"
+                )
+        for s in self.transverse:
+            if s < 0 or s >= n:
+                raise ValueError(f"invalid transverse slot {s} for rank {n}")
+
         # reps: {group_name: rep_name}. 비어있으면 모든 그룹의 singlet으로 간주.
         self.reps: dict[str, str] = dict(reps) if reps else {}
         if statistics not in ("bosonic", "fermionic"):
