@@ -18,7 +18,10 @@ from indexcalc.core.spatial_deriv import (
 from indexcalc.core.variation import (
     Variation, ZeroTensor, VariationRegistry, expand_variation,
 )
-from indexcalc.core.symmetry import canonicalize_antisym
+from indexcalc.core.symmetry import (
+    canonicalize_antisym,
+    Sym, Antisym, TraceFreeSym, expand_symmetrization,
+)
 from indexcalc.core.group import Group, Representation, GroupRegistry
 from indexcalc.core.invariant_tensors import (
     InvariantTensor, InvariantTensorRegistry,
@@ -52,6 +55,7 @@ __all__ = [
     "SpatialCovariantDeriv", "spatial_covariant", "expand_spatial_covariant",
     "Variation", "ZeroTensor", "VariationRegistry", "expand_variation",
     "canonicalize_antisym",
+    "Sym", "Antisym", "TraceFreeSym", "expand_symmetrization",
     "Group", "Representation", "GroupRegistry",
     "InvariantTensor", "InvariantTensorRegistry",
     "standard_su_n_invariants", "standard_u_n_invariants",

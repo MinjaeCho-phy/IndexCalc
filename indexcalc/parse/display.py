@@ -348,5 +348,18 @@ def to_latex(expr: TensorExpr) -> str:
             inner = f"({inner})"
         return f"\\nabla_{{{idx_latex}}} {inner}"
 
+    # Sym / Antisym / TraceFreeSym 노드
+    from indexcalc.core.symmetry import Sym, Antisym, TraceFreeSym
+    if isinstance(expr, (Sym, Antisym, TraceFreeSym)):
+        idx_latex = "".join(_latex_char(i.name) for i in expr.sym_indices)
+        inner = to_latex(expr.expr)
+        if isinstance(expr.expr, (TensorProduct, TensorSum)):
+            inner = f"({inner})"
+        if isinstance(expr, Sym):
+            return f"\\mathrm{{Sym}}_{{{idx_latex}}}\\!\\left[ {inner} \\right]"
+        if isinstance(expr, Antisym):
+            return f"\\mathrm{{Antisym}}_{{{idx_latex}}}\\!\\left[ {inner} \\right]"
+        return f"\\mathrm{{TFS}}_{{{idx_latex}}}\\!\\left[ {inner} \\right]"
+
     # 폴백
     return str(expr)
