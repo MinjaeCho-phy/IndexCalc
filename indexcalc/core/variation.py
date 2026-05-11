@@ -84,6 +84,10 @@ class VariationRegistry:
         """name을 background(δ=0)로 선언한다."""
         self._background.add(name)
 
+    def is_declared(self, name: str) -> bool:
+        """name이 varying 또는 background로 등록되어 있는지."""
+        return name in self._rules or name in self._background
+
     def delta_of(self, tensor: Tensor) -> TensorExpr:
         """단일 Tensor에 δ를 적용한다.
 
@@ -102,7 +106,7 @@ class VariationRegistry:
         if tensor.name in self._rules:
             template = self._rules[tensor.name]
             if template is None:
-                return Tensor("δ" + tensor.name, list(tensor.indices))
+                return _delta_tensor_preserving(tensor)
             return _substitute_indices(template, tensor.indices)
         # 자동 규칙: 이름이 "δ"로 시작하고 본체가 이미 선언되어 있으면
         # δⁿ⁺¹ 로 한 레벨 더 prefix. (P5: 2차 이상 변분 지원)
@@ -111,7 +115,7 @@ class VariationRegistry:
             if stripped in self._background:
                 return ZeroTensor(tensor.free_indices)
             if stripped in self._rules:
-                return Tensor("δ" + tensor.name, list(tensor.indices))
+                return _delta_tensor_preserving(tensor)
         raise ValueError(
             f"'{tensor.name}' not declared in VariationRegistry. "
             f"Use declare_varying() or declare_background() first."
@@ -125,11 +129,27 @@ def _substitute_indices(
     raise NotImplementedError("Custom replacement templates not yet supported")
 
 
+def _delta_tensor_preserving(tensor: Tensor) -> Tensor:
+    """``δ`` + name prefix Tensor 생성하며 모든 속성(antisym/sym/...)을 보존."""
+    return Tensor(
+        "δ" + tensor.name,
+        list(tensor.indices),
+        antisymmetric_pairs=list(tensor.antisymmetric_pairs),
+        symmetric_pairs=list(tensor.symmetric_pairs),
+        traceless=list(tensor.traceless),
+        transverse=list(tensor.transverse),
+        reps=dict(tensor.reps),
+        statistics=tensor.statistics,
+    )
+
+
 # ─── expand_variation ────────────────────────────────────────
 
 
 def expand_variation(
-    expr: TensorExpr, registry: VariationRegistry,
+    expr: TensorExpr,
+    registry: VariationRegistry,
+    mreg=None,
 ) -> TensorExpr:
     """Variation 노드를 Leibniz rule로 전개한다.
 
@@ -139,6 +159,12 @@ def expand_variation(
         전개할 표현식. Variation 노드를 찾아서 전개한다.
     registry : VariationRegistry
         각 텐서의 varying/background 선언.
+    mreg : MetricRegistry, optional
+        제공 시 G6 inverse metric variation 자동 치환:
+        ``δg^{μν} → −g^{μρ}g^{νσ}δg_{ρσ}``.
+        Inverse metric 패턴(모든 인덱스 upper, 등록된 inverse name)을 만나고
+        해당 metric이 ``registry``에 declared되어 있을 때만 적용. 없거나
+        mreg를 전달하지 않으면 기존처럼 ``δg^{μν}`` 텐서 leaf로 둔다.
 
     Returns
     -------
@@ -146,26 +172,26 @@ def expand_variation(
         δ가 전개된 표현식. Variation 노드가 Tensor leaf로 치환된다.
     """
     if isinstance(expr, Variation):
-        return _apply_delta(expr.expr, registry)
+        return _apply_delta(expr.expr, registry, mreg)
 
     if isinstance(expr, TensorProduct):
         return TensorProduct(
-            expand_variation(expr.left, registry),
-            expand_variation(expr.right, registry),
+            expand_variation(expr.left, registry, mreg),
+            expand_variation(expr.right, registry, mreg),
         )
     if isinstance(expr, TensorSum):
         return TensorSum(
-            expand_variation(expr.left, registry),
-            expand_variation(expr.right, registry),
+            expand_variation(expr.left, registry, mreg),
+            expand_variation(expr.right, registry, mreg),
         )
     if isinstance(expr, ScalarMul):
-        return ScalarMul(expr.scalar, expand_variation(expr.expr, registry))
+        return ScalarMul(expr.scalar, expand_variation(expr.expr, registry, mreg))
 
     return expr
 
 
 def _apply_delta(
-    inner: TensorExpr, registry: VariationRegistry,
+    inner: TensorExpr, registry: VariationRegistry, mreg=None,
 ) -> TensorExpr:
     """Variation 내부 표현식에 δ를 적용한다 (Leibniz rule 재귀)."""
     from indexcalc.core.deriv import PartialDeriv, CovariantDeriv
@@ -175,31 +201,35 @@ def _apply_delta(
     if isinstance(inner, ZeroTensor):
         return inner
 
-    # δ(Tensor) → registry lookup
+    # δ(Tensor) → registry lookup, G6 inverse metric은 자동 치환
     if isinstance(inner, Tensor):
+        if mreg is not None:
+            expanded = _expand_inverse_metric_variation(inner, mreg, registry)
+            if expanded is not None:
+                return _simplify_zeros(expanded)
         return _simplify_zeros(registry.delta_of(inner))
 
     # δ(A + B) → δA + δB
     if isinstance(inner, TensorSum):
-        left = _apply_delta(inner.left, registry)
-        right = _apply_delta(inner.right, registry)
+        left = _apply_delta(inner.left, registry, mreg)
+        right = _apply_delta(inner.right, registry, mreg)
         return _simplify_zeros(TensorSum(left, right))
 
     # δ(A * B) → (δA)*B + A*(δB)
     if isinstance(inner, TensorProduct):
-        dA_B = TensorProduct(_apply_delta(inner.left, registry), inner.right)
-        A_dB = TensorProduct(inner.left, _apply_delta(inner.right, registry))
+        dA_B = TensorProduct(_apply_delta(inner.left, registry, mreg), inner.right)
+        A_dB = TensorProduct(inner.left, _apply_delta(inner.right, registry, mreg))
         return _simplify_zeros(TensorSum(dA_B, A_dB))
 
     # δ(c * A) → c * δA
     if isinstance(inner, ScalarMul):
         return _simplify_zeros(
-            ScalarMul(inner.scalar, _apply_delta(inner.expr, registry))
+            ScalarMul(inner.scalar, _apply_delta(inner.expr, registry, mreg))
         )
 
     # δ(Tr T) → Tr(δT)  (trace 인덱스는 변분과 무관하게 보존)
     if isinstance(inner, Trace):
-        inner_delta = _apply_delta(inner.tensor, registry)
+        inner_delta = _apply_delta(inner.tensor, registry, mreg)
         if isinstance(inner_delta, ZeroTensor):
             return ZeroTensor(inner.free_indices)
         if isinstance(inner_delta, Tensor):
@@ -210,24 +240,24 @@ def _apply_delta(
     # δ(∂_μ X) → ∂_μ(δX)
     if isinstance(inner, PartialDeriv):
         return PartialDeriv(
-            _apply_delta(inner.expr, registry), inner.deriv_index,
+            _apply_delta(inner.expr, registry, mreg), inner.deriv_index,
         )
 
     # δ(∇_μ X) → ∇_μ(δX) + (δΓ·X)  (P6: Palatini)
     if isinstance(inner, CovariantDeriv):
-        return _apply_delta_covariant(inner, registry)
+        return _apply_delta_covariant(inner, registry, mreg)
 
     # δ(δX) → δ를 두 번 적용 (P5: 완전 전개)
     if isinstance(inner, Variation):
-        once = _apply_delta(inner.expr, registry)
-        return _apply_delta(once, registry)
+        once = _apply_delta(inner.expr, registry, mreg)
+        return _apply_delta(once, registry, mreg)
 
     # 알 수 없는 노드 → Variation으로 감싸서 유지
     return Variation(inner)
 
 
 def _apply_delta_covariant(
-    cov, registry: VariationRegistry,
+    cov, registry: VariationRegistry, mreg=None,
 ) -> TensorExpr:
     """δ(∇_μ expr) 전개. varying connection이 있으면 Palatini δΓ 항 추가."""
     from indexcalc.core.deriv import CovariantDeriv
@@ -241,11 +271,11 @@ def _apply_delta_covariant(
         distributed = _distribute_nabla_once(cov)
         if distributed is cov:
             # 더 분배할 수 없는 노드 — background connection으로 가정하고 δ 이동
-            return type(cov)(_apply_delta(inner, registry), mu, conns)
-        return _apply_delta(distributed, registry)
+            return type(cov)(_apply_delta(inner, registry, mreg), mu, conns)
+        return _apply_delta(distributed, registry, mreg)
 
     T = inner
-    dT = _apply_delta(T, registry)
+    dT = _apply_delta(T, registry, mreg)
 
     cov_cls = type(cov)
     if isinstance(dT, ZeroTensor):
@@ -259,6 +289,64 @@ def _apply_delta_covariant(
     if isinstance(base, ZeroTensor):
         return _simplify_zeros(correction)
     return _simplify_zeros(TensorSum(base, correction))
+
+
+# ─── G6: inverse metric variation auto-expansion ─────────
+
+
+def _next_dummy(base: str, taken: set[str]) -> str:
+    """``base_1, base_2, …`` 중 ``taken``에 없는 첫 이름."""
+    i = 1
+    while True:
+        candidate = f"{base}_{i}"
+        if candidate not in taken:
+            return candidate
+        i += 1
+
+
+def _expand_inverse_metric_variation(
+    tensor: Tensor, mreg, registry: VariationRegistry,
+):
+    """δ(g^{μν}) → −g^{μα} g^{νβ} δg_{αβ}.
+
+    조건:
+        - tensor가 ``mreg.is_inverse_metric``으로 inverse metric으로 인식
+        - 해당 metric의 lower 이름 (e.g., 'g')이 registry에 declared
+
+    리턴:
+        TensorExpr (전개된 식) 또는 ``None`` (조건 불충족 — 보통 흐름으로).
+    """
+    space = mreg.is_inverse_metric(tensor)
+    if space is None:
+        return None
+    metric_lo = mreg.get_metric(space)
+    inverse_up = mreg.get_inverse(space)
+    if not registry.is_declared(metric_lo.name):
+        return None
+
+    μ, ν = tensor.indices  # both upper
+    base = space.indices[0] if space.indices else "i"
+    taken = {μ.name, ν.name}
+    α = _next_dummy(base, taken)
+    taken.add(α)
+    β = _next_dummy(base, taken)
+
+    g_μα = Tensor(inverse_up.name, [
+        Index(μ.name, space, "upper"),
+        Index(α, space, "upper"),
+    ])
+    g_νβ = Tensor(inverse_up.name, [
+        Index(ν.name, space, "upper"),
+        Index(β, space, "upper"),
+    ])
+    # δg_{αβ}: registry로 — varying이면 Tensor("δg", ...), background이면 ZeroTensor.
+    g_lo_template = Tensor(metric_lo.name, [
+        Index(α, space, "lower"),
+        Index(β, space, "lower"),
+    ])
+    delta_g_lo = registry.delta_of(g_lo_template)
+
+    return ScalarMul(-1, TensorProduct(TensorProduct(g_μα, g_νβ), delta_g_lo))
 
 
 def _distribute_nabla_once(cov) -> TensorExpr:
@@ -297,7 +385,12 @@ def _palatini_correction(
     각 slot s에 대해 해당 공간에 varying connection이 있으면:
       - upper index a: + δΓ^a_{μ, ρ} · T(slot s ← ρ_upper)
       - lower index b: - δΓ^ρ_{μ, b} · T(slot s ← ρ_lower)
+
+    LeviCivitaConnection (torsion-free) 인 경우 δΓ에도 ``symmetric_pairs=[(1,2)]``
+    부여 — Γ의 lower 두 슬롯 대칭이 변분 후에도 보존됨.
     """
+    from indexcalc.core.deriv import LeviCivitaConnection
+
     existing = {idx.name for idx in tensor.indices} | {mu.name}
     terms: list[TensorExpr] = []
 
@@ -318,13 +411,15 @@ def _palatini_correction(
 
         dsym = "δ" + conn.symbol
         new_indices = list(tensor.indices)
+        # δΓ의 sym_pairs: LeviCivita conn (torsion-free)이면 lower 두 슬롯 sym
+        dg_sym_pairs = [(1, 2)] if isinstance(conn, LeviCivitaConnection) else []
 
         if idx.position == "upper":
             dgamma = Tensor(dsym, [
                 Index(idx.name, idx.space, "upper"),
                 Index(mu.name, mu.space, "lower"),
                 Index(dummy_name, idx.space, "lower"),
-            ])
+            ], symmetric_pairs=dg_sym_pairs)
             new_indices[slot] = Index(dummy_name, idx.space, "upper")
             Tp = Tensor(tensor.name, new_indices)
             terms.append(TensorProduct(dgamma, Tp))
@@ -333,7 +428,7 @@ def _palatini_correction(
                 Index(dummy_name, idx.space, "upper"),
                 Index(mu.name, mu.space, "lower"),
                 Index(idx.name, idx.space, "lower"),
-            ])
+            ], symmetric_pairs=dg_sym_pairs)
             new_indices[slot] = Index(dummy_name, idx.space, "lower")
             Tp = Tensor(tensor.name, new_indices)
             terms.append(ScalarMul(-1, TensorProduct(dgamma, Tp)))

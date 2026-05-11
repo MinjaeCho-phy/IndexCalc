@@ -10,6 +10,7 @@ from __future__ import annotations
 from indexcalc.core.index import Index, IndexSpace
 from indexcalc.core.tensor import (
     Tensor, TensorExpr, TensorProduct, TensorSum, ScalarMul,
+    _resolve_einstein_pairs,
 )
 
 
@@ -49,7 +50,13 @@ class PartialDeriv(TensorExpr):
 
     @property
     def free_indices(self) -> list[Index]:
-        return [self.deriv_index] + self.expr.free_indices
+        """deriv_index와 inner free 인덱스를 모은 뒤 Einstein 자동 contraction.
+
+        예: ∂_ρ Γ^ρ_νσ에서 deriv_index ρ↓가 inner의 ρ↑와 contract → free=[ν, σ].
+        """
+        return _resolve_einstein_pairs(
+            [self.deriv_index] + self.expr.free_indices
+        )
 
     def __repr__(self) -> str:
         return f"∂_{self.deriv_index.name}({self.expr})"
@@ -228,6 +235,22 @@ class LeviCivitaConnection(Connection):
         self.metric = metric
         self.inverse = inverse
 
+    def make_tensor(
+        self, upper_name: str, lower1_name: str, lower2_name: str,
+    ) -> Tensor:
+        """Γ^a_{bc} Tensor — torsion-free symmetric (slots 1↔2)."""
+        return Tensor(self.symbol, [
+            Index(upper_name, self.space, "upper"),
+            Index(lower1_name, self.deriv_space, "lower"),
+            Index(lower2_name, self.space, "lower"),
+        ], symmetric_pairs=[(1, 2)])
+
+    def christoffel(
+        self, upper_name: str, lower1_name: str, lower2_name: str,
+    ) -> Tensor:
+        """Convenience alias for ``make_tensor`` — explicit Γ tensor builder."""
+        return self.make_tensor(upper_name, lower1_name, lower2_name)
+
     def definition(self) -> TensorExpr:
         """Christoffel symbol의 symbolic 정의를 반환한다.
 
@@ -328,10 +351,382 @@ class CovariantDeriv(TensorExpr):
 
     @property
     def free_indices(self) -> list[Index]:
-        return [self.deriv_index] + self.expr.free_indices
+        """deriv_index와 inner free 인덱스를 모은 뒤 Einstein 자동 contraction.
+
+        예: ∇_ρ T^ρ_νσ에서 deriv_index ρ↓가 inner의 ρ↑와 contract → free=[ν, σ].
+        """
+        return _resolve_einstein_pairs(
+            [self.deriv_index] + self.expr.free_indices
+        )
 
     def __repr__(self) -> str:
         return f"∇_{self.deriv_index.name}({self.expr})"
+
+
+# ─── G7: ∂ → ∇̄ + Γ̄·T forward conversion ───────────────────
+
+
+def _next_dummy_for(base: str, taken: set[str]) -> str:
+    """``base_1, base_2, …`` 중 ``taken``에 없는 첫 이름."""
+    i = 1
+    while True:
+        candidate = f"{base}_{i}"
+        if candidate not in taken:
+            return candidate
+        i += 1
+
+
+def _replace_slot(T: Tensor, slot: int, new_idx: Index) -> Tensor:
+    """T의 slot 위치 인덱스만 ``new_idx``로 바꾼 새 Tensor (속성 보존)."""
+    new_indices = list(T.indices)
+    new_indices[slot] = new_idx
+    return Tensor(
+        T.name, new_indices,
+        antisymmetric_pairs=list(T.antisymmetric_pairs),
+        symmetric_pairs=list(T.symmetric_pairs),
+        traceless=list(T.traceless),
+        transverse=list(T.transverse),
+        reps=dict(T.reps),
+        statistics=T.statistics,
+    )
+
+
+def _expand_partial_to_cov(
+    T: Tensor, mu: Index, conn_map: dict[str, Connection],
+) -> TensorExpr:
+    """``∂_μ T = ∇̄_μ T - Σ_{upper s} Γ·T + Σ_{lower s} Γ·T`` explicit form.
+
+    각 slot에 대해 connection이 있으면 보정 항을 누적. 없는 slot은 건너뜀
+    (해당 인덱스 공간에 connection 미정의 → ∂ = ∇̄ 가정).
+    """
+    cov_cls = CovariantDeriv
+    cov = cov_cls(T, mu, conn_map)
+
+    correction_terms: list[TensorExpr] = []
+    taken = {idx.name for idx in T.indices} | {mu.name}
+
+    for slot, idx in enumerate(T.indices):
+        space = idx.space
+        if space.name not in conn_map:
+            continue
+        conn = conn_map[space.name]
+
+        base = space.indices[0] if space.indices else "i"
+        dummy = _next_dummy_for(base, taken)
+        taken.add(dummy)
+
+        if idx.position == "upper":
+            # ∂_μ T^ρ = ∇̄_μ T^ρ - Γ^ρ_{μ α} T^α
+            gamma = Tensor(conn.symbol, [
+                Index(idx.name, space, "upper"),
+                Index(mu.name, conn.deriv_space, "lower"),
+                Index(dummy, space, "lower"),
+            ])
+            T_replaced = _replace_slot(T, slot, Index(dummy, space, "upper"))
+            correction_terms.append(
+                ScalarMul(-1, TensorProduct(gamma, T_replaced))
+            )
+        else:
+            # ∂_μ T_ρ = ∇̄_μ T_ρ + Γ^α_{μ ρ} T_α
+            gamma = Tensor(conn.symbol, [
+                Index(dummy, space, "upper"),
+                Index(mu.name, conn.deriv_space, "lower"),
+                Index(idx.name, space, "lower"),
+            ])
+            T_replaced = _replace_slot(T, slot, Index(dummy, space, "lower"))
+            correction_terms.append(TensorProduct(gamma, T_replaced))
+
+    result: TensorExpr = cov
+    for term in correction_terms:
+        result = TensorSum(result, term)
+    return result
+
+
+def partial_to_covariant(
+    expr: TensorExpr,
+    conn_map: dict[str, Connection] | Connection,
+    *,
+    only_for: set[str] | None = None,
+) -> TensorExpr:
+    """``∂_μ T`` (T leaf Tensor) 패턴을 ``∇̄_μ T - Σ Γ̄·T``로 explicit 전개.
+
+    .. math::
+        \\partial_\\mu T^\\rho \\;=\\; \\nabla_\\mu T^\\rho \\;-\\; \\Gamma^\\rho{}_{\\mu\\alpha} T^\\alpha
+        \\partial_\\mu T_\\rho \\;=\\; \\nabla_\\mu T_\\rho \\;+\\; \\Gamma^\\alpha{}_{\\mu\\rho} T_\\alpha
+
+    각 slot마다 connection이 있으면 보정 항 1개씩.
+
+    Parameters
+    ----------
+    expr : TensorExpr
+    conn_map : dict[str, Connection] or Connection
+        IndexSpace.name → connection. 단일 connection이면 자동으로 dict로 변환.
+    only_for : set[str] or None
+        지정 시 leaf Tensor.name이 이 집합 안에 있을 때만 변환. ``None``이면
+        모든 leaf에 대해.
+
+    Returns
+    -------
+    TensorExpr
+        ``∂_μ T`` 패턴이 ``CovariantDeriv(T, μ) ± Γ·T`` 합으로 전환된 식.
+        다른 노드(TensorProduct/Sum/ScalarMul/CovariantDeriv)는 재귀로 내려감.
+    """
+    if isinstance(conn_map, Connection):
+        conn_map = {conn_map.space.name: conn_map}
+    return _convert_partial(expr, conn_map, only_for)
+
+
+def covariant_collapse(
+    expr: TensorExpr,
+    conn_map: dict[str, Connection] | Connection,
+    *,
+    only_for: set[str] | None = None,
+    mreg=None,
+) -> TensorExpr:
+    """``∂_μ T + Σ Γ̄·T`` (보정 항) 묶음을 ``∇̄_μ T``로 collapse (G7 backward).
+
+    ``partial_to_covariant``의 역 방향. TensorSum 안에서 다음 패턴을 찾아 묶는다:
+
+    .. math::
+        \\partial_\\mu T \\;+\\; \\sum_{\\text{upper s}} +\\Gamma\\cdot T
+        \\;+\\; \\sum_{\\text{lower s}} -\\Gamma\\cdot T
+        \\;=\\; \\nabla_\\mu T
+
+    알고리즘:
+        1. expr 트리에서 TensorSum 노드를 찾는다.
+        2. summand들 중 ``PartialDeriv(T_leaf, μ_lo)`` 또는 ``±·PartialDeriv``
+           (ScalarMul 외부 부호) 식별.
+        3. ``simplify(expand_covariant(CovariantDeriv(T, μ, conn)), mreg)``로
+           expected 보정 생성 (simplify가 Γ sym + dummy rename으로 self-trace
+           cancellation을 정리).
+        4. 외부 부호(scalar)에 따라 expected corrections에도 동일 scalar 곱.
+        5. expected 보정 각 항을 sum 내 다른 summand와 dummy 이름 무관하게 매칭
+           (``canonical_form_modulo_dummies`` + scalar 일치).
+        6. 모두 매칭되면 그 group을 ``±·CovariantDeriv``로 교체.
+
+    Parameters
+    ----------
+    expr : TensorExpr
+    conn_map : dict[str, Connection] or Connection
+    only_for : set[str] or None
+        지정 시 이 leaf 텐서 이름들에 대해서만 collapse 시도.
+    mreg : MetricRegistry or None
+        제공 시 expected expansion에 ``simplify(..., mreg)``를 적용 — Γ symmetry
+        등으로 self-cancelling 보정 항이 정리되어 매칭률 향상. 특히 self-traced
+        ``T^μ_μν`` 같은 tensor에 ∇를 적용할 때 필수.
+
+    Returns
+    -------
+    TensorExpr
+        매칭 성공 항이 있으면 일부 ``∇̄`` 형태로 묶인 새 expr; 없으면 원본.
+    """
+    if isinstance(conn_map, Connection):
+        conn_map = {conn_map.space.name: conn_map}
+    # distribute_products로 ScalarMul(c, TensorSum) 를 평탄화 — 보정 항 매칭에 필수
+    from indexcalc.core.simplify import distribute_products, pull_scalars
+    expr = pull_scalars(distribute_products(expr))
+    return _collapse_walk(expr, conn_map, only_for, mreg)
+
+
+def _collapse_walk(expr, conn_map, only_for, mreg=None):
+    if isinstance(expr, TensorSum):
+        matched = _try_collapse_tensorsum(expr, conn_map, only_for, mreg)
+        if matched is not None:
+            return matched
+        new_l = _collapse_walk(expr.left, conn_map, only_for, mreg)
+        new_r = _collapse_walk(expr.right, conn_map, only_for, mreg)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+
+    if isinstance(expr, TensorProduct):
+        new_l = _collapse_walk(expr.left, conn_map, only_for, mreg)
+        new_r = _collapse_walk(expr.right, conn_map, only_for, mreg)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorProduct(new_l, new_r)
+        return expr
+
+    if isinstance(expr, ScalarMul):
+        new_inner = _collapse_walk(expr.expr, conn_map, only_for, mreg)
+        if new_inner is not expr.expr:
+            return ScalarMul(expr.scalar, new_inner)
+        return expr
+
+    if isinstance(expr, PartialDeriv):
+        new_inner = _collapse_walk(expr.expr, conn_map, only_for, mreg)
+        if new_inner is not expr.expr:
+            return PartialDeriv(new_inner, expr.deriv_index)
+        return expr
+
+    if isinstance(expr, CovariantDeriv):
+        new_inner = _collapse_walk(expr.expr, conn_map, only_for, mreg)
+        if new_inner is not expr.expr:
+            return type(expr)(new_inner, expr.deriv_index, expr.connections)
+        return expr
+
+    return expr
+
+
+def _try_collapse_tensorsum(expr, conn_map, only_for, mreg=None):
+    """TensorSum 노드에서 ∂T + Γ corrections 패턴 매칭. 변경 시 새 expr, 아니면 None."""
+    from indexcalc.core.simplify import (
+        _flatten_sum, _split_scalar, canonical_form_modulo_dummies, simplify,
+    )
+    from indexcalc.core.variation import ZeroTensor
+
+    summands = _flatten_sum(expr)
+    consumed = [False] * len(summands)
+    new_summands: list[TensorExpr] = []
+    any_collapsed = False
+
+    for i, s in enumerate(summands):
+        if consumed[i]:
+            continue
+        partial_info = _identify_partial_leaf(s, only_for)
+        if partial_info is None:
+            new_summands.append(s)
+            consumed[i] = True
+            continue
+
+        outer_scalar, T, mu = partial_info  # outer_scalar = ±1 or other
+
+        # Build expected ∇̄_μ T explicit form, simplify로 self-cancelling 정리
+        cov_node = CovariantDeriv(T, mu, conn_map)
+        explicit = expand_covariant(cov_node)
+        explicit = simplify(explicit, mreg)
+        cov_terms = _flatten_sum(explicit)
+        # 첫 항은 ∂T (또는 ScalarMul wrapping 후); 분리
+        partial_idx = None
+        for k, t in enumerate(cov_terms):
+            sc, body = _split_scalar(t)
+            if isinstance(body, PartialDeriv) and body.expr is T and sc == 1:
+                partial_idx = k
+                break
+        if partial_idx is None:
+            # ∂T가 simplified explicit에 없음 — collapse 불가
+            new_summands.append(s)
+            consumed[i] = True
+            continue
+        expected_corrections = [t for k, t in enumerate(cov_terms) if k != partial_idx]
+        if not expected_corrections:
+            new_summands.append(s)
+            consumed[i] = True
+            continue
+
+        # outer_scalar 만큼 expected 보정에 곱.
+        # (ex: original summand가 -∂T이면, -∇T = -∂T - corrections.
+        #  매칭 대상 summand의 scalar는 -1 * expected의 scalar.)
+        # 각 expected correction을 unconsumed summand와 매칭
+        found_in: list[int] = []
+        for ec in expected_corrections:
+            ec_scalar, ec_body = _split_scalar(ec)
+            target_scalar = outer_scalar * ec_scalar
+            ec_canon = _safe_canon_modulo_dummies(ec_body)
+            best_j = None
+            for j in range(len(summands)):
+                if consumed[j] or j == i or j in found_in:
+                    continue
+                ss = summands[j]
+                ss_scalar, ss_body = _split_scalar(ss)
+                if ss_scalar != target_scalar:
+                    continue
+                ss_canon = _safe_canon_modulo_dummies(ss_body)
+                if ss_canon is None or ec_canon is None:
+                    continue
+                if ss_canon == ec_canon:
+                    best_j = j
+                    break
+            if best_j is None:
+                break
+            found_in.append(best_j)
+
+        if len(found_in) == len(expected_corrections):
+            consumed[i] = True
+            for j in found_in:
+                consumed[j] = True
+            replacement: TensorExpr = cov_node
+            if outer_scalar != 1:
+                replacement = ScalarMul(outer_scalar, cov_node)
+            new_summands.append(replacement)
+            any_collapsed = True
+        else:
+            new_summands.append(s)
+            consumed[i] = True
+
+    if not any_collapsed:
+        return None
+
+    if not new_summands:
+        return ZeroTensor(expr.free_indices)
+    if len(new_summands) == 1:
+        return new_summands[0]
+    result = new_summands[0]
+    for s in new_summands[1:]:
+        result = TensorSum(result, s)
+    return result
+
+
+def _identify_partial_leaf(s, only_for):
+    """summand가 ``[ScalarMul(c, )] PartialDeriv(Tensor_leaf, μ_lo)``이면
+    ``(c, T, μ_lo)`` 반환 (c는 기본 1 또는 scalar). 아니면 None."""
+    scalar = 1
+    body = s
+    if isinstance(body, ScalarMul):
+        scalar = body.scalar
+        body = body.expr
+    if isinstance(body, PartialDeriv) and isinstance(body.expr, Tensor):
+        T = body.expr
+        if only_for is None or T.name in only_for:
+            return scalar, T, body.deriv_index
+    return None
+
+
+def _safe_canon_modulo_dummies(expr):
+    """``canonical_form_modulo_dummies`` 호출 — 실패 시 None."""
+    from indexcalc.core.simplify import canonical_form_modulo_dummies
+    try:
+        return canonical_form_modulo_dummies(expr)
+    except Exception:
+        return None
+
+
+def _convert_partial(expr, conn_map, only_for):
+    if isinstance(expr, PartialDeriv):
+        new_inner = _convert_partial(expr.expr, conn_map, only_for)
+        if isinstance(new_inner, Tensor):
+            if only_for is None or new_inner.name in only_for:
+                return _expand_partial_to_cov(new_inner, expr.deriv_index, conn_map)
+        if new_inner is not expr.expr:
+            return PartialDeriv(new_inner, expr.deriv_index)
+        return expr
+
+    if isinstance(expr, CovariantDeriv):
+        new_inner = _convert_partial(expr.expr, conn_map, only_for)
+        if new_inner is not expr.expr:
+            return type(expr)(new_inner, expr.deriv_index, expr.connections)
+        return expr
+
+    if isinstance(expr, TensorProduct):
+        l = _convert_partial(expr.left, conn_map, only_for)
+        r = _convert_partial(expr.right, conn_map, only_for)
+        if l is not expr.left or r is not expr.right:
+            return TensorProduct(l, r)
+        return expr
+
+    if isinstance(expr, TensorSum):
+        l = _convert_partial(expr.left, conn_map, only_for)
+        r = _convert_partial(expr.right, conn_map, only_for)
+        if l is not expr.left or r is not expr.right:
+            return TensorSum(l, r)
+        return expr
+
+    if isinstance(expr, ScalarMul):
+        new_inner = _convert_partial(expr.expr, conn_map, only_for)
+        if new_inner is not expr.expr:
+            return ScalarMul(expr.scalar, new_inner)
+        return expr
+
+    return expr
 
 
 def covariant(
@@ -504,7 +899,15 @@ def _expand_single_covariant(cov: CovariantDeriv) -> TensorExpr:
 
             new_indices = list(inner.indices)
             new_indices[slot] = Index(dummy, idx.space, "upper")
-            t_replaced = Tensor(inner.name, new_indices)
+            t_replaced = Tensor(
+                inner.name, new_indices,
+                antisymmetric_pairs=list(inner.antisymmetric_pairs),
+                symmetric_pairs=list(inner.symmetric_pairs),
+                traceless=list(inner.traceless),
+                transverse=list(inner.transverse),
+                reps=dict(inner.reps),
+                statistics=inner.statistics,
+            )
 
             result = result + TensorProduct(gamma, t_replaced)
 
@@ -515,7 +918,15 @@ def _expand_single_covariant(cov: CovariantDeriv) -> TensorExpr:
 
             new_indices = list(inner.indices)
             new_indices[slot] = Index(dummy, idx.space, "lower")
-            t_replaced = Tensor(inner.name, new_indices)
+            t_replaced = Tensor(
+                inner.name, new_indices,
+                antisymmetric_pairs=list(inner.antisymmetric_pairs),
+                symmetric_pairs=list(inner.symmetric_pairs),
+                traceless=list(inner.traceless),
+                transverse=list(inner.transverse),
+                reps=dict(inner.reps),
+                statistics=inner.statistics,
+            )
 
             result = result - TensorProduct(gamma, t_replaced)
 

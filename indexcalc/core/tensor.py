@@ -14,6 +14,33 @@ from __future__ import annotations
 from indexcalc.core.index import Index, IndexSpace
 
 
+def _resolve_einstein_pairs(indices: list[Index]) -> list[Index]:
+    """Einstein convention 자동 contraction: 한 노드 안에서 같은 이름 + 같은
+    IndexSpace + 반대 position인 인덱스가 정확히 두 번 등장하면 그 쌍을 dummy로
+    제거한다.
+
+    ``Tensor`` (e.g., $\\Gamma^\\rho{}_{\\rho\\lambda}$ — slot 0 ↔ slot 1)와
+    ``PartialDeriv``/``CovariantDeriv`` (deriv_index ↔ inner의 free index)에서
+    공통으로 사용. 같은 이름이 1번이면 free, 같은 위치로 2번이면 그대로 둠
+    (Einstein 위반은 ``validate_einstein``에서 별도로 잡는다).
+    """
+    groups: dict[tuple[str, str], list[int]] = {}
+    for i, idx in enumerate(indices):
+        key = (idx.name, idx.space.name)
+        groups.setdefault(key, []).append(i)
+
+    to_remove: set[int] = set()
+    for positions in groups.values():
+        if len(positions) != 2:
+            continue
+        i1, i2 = positions
+        if indices[i1].position != indices[i2].position:
+            to_remove.add(i1)
+            to_remove.add(i2)
+
+    return [idx for i, idx in enumerate(indices) if i not in to_remove]
+
+
 class TensorExpr:
     """모든 텐서 표현식의 기반 클래스.
 
@@ -163,7 +190,12 @@ class Tensor(TensorExpr):
 
     @property
     def free_indices(self) -> list[Index]:
-        return list(self.indices)
+        """Self-contracted (같은 이름·반대 위치) 쌍을 dummy로 제거한 free 리스트.
+
+        예: $\\Gamma^\\rho{}_{\\rho\\lambda}$ (indices=[ρ↑, ρ↓, λ↓]) →
+        free=[λ↓]. ``Tensor.indices``는 원본을 보존; display나 저장 용도.
+        """
+        return _resolve_einstein_pairs(list(self.indices))
 
     def __repr__(self) -> str:
         if not self.indices:

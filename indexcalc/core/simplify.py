@@ -35,7 +35,8 @@ def rename_index(expr: TensorExpr, mapping: dict[str, str]) -> TensorExpr:
     """expr 트리 전체에서 인덱스 이름을 ``mapping``에 따라 치환한다.
 
     위치(upper/lower)와 IndexSpace는 보존; 이름만 변경.
-    Tensor의 antisymmetric_pairs / reps / statistics 등 모든 메타도 보존.
+    Tensor의 antisymmetric_pairs / symmetric_pairs / traceless / transverse /
+    reps / statistics 등 모든 메타도 보존.
     """
     if isinstance(expr, ZeroTensor):
         new_free = [
@@ -52,6 +53,9 @@ def rename_index(expr: TensorExpr, mapping: dict[str, str]) -> TensorExpr:
         return Tensor(
             expr.name, new_indices,
             antisymmetric_pairs=list(expr.antisymmetric_pairs),
+            symmetric_pairs=list(expr.symmetric_pairs),
+            traceless=list(expr.traceless),
+            transverse=list(expr.transverse),
             reps=dict(expr.reps),
             statistics=expr.statistics,
         )
@@ -122,12 +126,24 @@ def _index_key(idx: Index, swap_names: Sequence[str]) -> tuple:
 
 
 def _factor_key_no_swap(factor: TensorExpr, swap_names: Sequence[str]) -> tuple:
-    """Factor의 sort key — swap_names를 placeholder로 처리한 hashable signature."""
+    """Factor의 sort key — swap_names를 placeholder로 처리한 hashable signature.
+
+    Tensor의 ``symmetric_pairs`` slot은 그 두 인덱스 자리의 key를 정렬해 흡수한다.
+    이렇게 해야 dummy 이름 swap (n_i↔n_j) 후의 rest가 sym tensor의 key 차원에서
+    invariant로 인식되어 ``is_zero_by_antisym_swap``이 antisym × sym = 0 패턴을
+    잡을 수 있다.
+    """
     if isinstance(factor, Tensor):
-        idx_keys = tuple(_index_key(idx, swap_names) for idx in factor.indices)
+        idx_keys = [_index_key(idx, swap_names) for idx in factor.indices]
+        for s_a, s_b in factor.symmetric_pairs:
+            if idx_keys[s_a] > idx_keys[s_b]:
+                idx_keys[s_a], idx_keys[s_b] = idx_keys[s_b], idx_keys[s_a]
         return (
-            "Tensor", factor.name, idx_keys,
+            "Tensor", factor.name, tuple(idx_keys),
             tuple(factor.antisymmetric_pairs),
+            tuple(factor.symmetric_pairs),
+            tuple(factor.traceless),
+            tuple(factor.transverse),
             factor.statistics,
         )
     if isinstance(factor, ScalarMul):
@@ -314,6 +330,185 @@ def is_zero_by_antisym_swap(expr: TensorExpr) -> TensorExpr:
             rest_swap = rename_index(rest, {n_i: n_j, n_j: n_i})
 
             if is_structurally_equal(rest, rest_swap, swap_names=(n_i, n_j)):
+                return ZeroTensor(expr.free_indices)
+
+    return expr
+
+
+# ─── G5: traceless × metric → 0 ─────────────────────────────
+
+
+def is_zero_by_traceless_metric(expr: TensorExpr, mreg) -> TensorExpr:
+    """Tensor의 ``traceless`` slot 쌍이 metric으로 완전히 contract되면 ZeroTensor.
+
+    예: ``γ^{ij} · h^{TT}_{ij}``  (h^TT가 traceless=[(0,1)]) → 0.
+
+    탐지 조건:
+        - 어떤 factor T가 ``T.traceless`` 쌍 (s_i, s_j)를 갖는다.
+        - T의 두 slot 인덱스 이름 n_i, n_j가 둘 다 dummy (전역 count == 2,
+          expr.free_indices에 없음).
+        - 다른 factor M이 mreg.is_metric(M)에서 같은 IndexSpace의 metric으로
+          확인되고, M의 두 인덱스 이름이 ``{n_i, n_j}``와 일치.
+
+    조건 만족 시 ``ZeroTensor(expr.free_indices)`` 반환, 아니면 expr 그대로.
+    """
+    if not isinstance(expr, TensorProduct):
+        return expr
+    if mreg is None:
+        return expr
+
+    factors = collect_factors(expr)
+    name_counts = _index_name_count(factors)
+    free_names = {idx.name for idx in expr.free_indices}
+
+    for k, T in enumerate(factors):
+        if not isinstance(T, Tensor) or not T.traceless:
+            continue
+        for s_i, s_j in T.traceless:
+            n_i = T.indices[s_i].name
+            n_j = T.indices[s_j].name
+            if n_i == n_j:
+                continue
+            if n_i in free_names or n_j in free_names:
+                continue
+            if name_counts.get(n_i, 0) != 2 or name_counts.get(n_j, 0) != 2:
+                continue
+            slot_space = T.indices[s_i].space
+            for j, M in enumerate(factors):
+                if j == k or not isinstance(M, Tensor):
+                    continue
+                if len(M.indices) != 2:
+                    continue
+                space = mreg.is_metric(M)
+                if space is None or space != slot_space:
+                    continue
+                m_names = {M.indices[0].name, M.indices[1].name}
+                if m_names == {n_i, n_j}:
+                    return ZeroTensor(expr.free_indices)
+    return expr
+
+
+# ─── G5: transverse × deriv → 0 ─────────────────────────────
+
+
+def _collect_deriv_indices(factors: list[TensorExpr]) -> list[tuple[int, Index]]:
+    """factor 리스트에서 (factor_idx, deriv_index) 쌍 — Partial/Covariant deriv 한정."""
+    out: list[tuple[int, Index]] = []
+    for k, f in enumerate(factors):
+        if isinstance(f, (PartialDeriv, CovariantDeriv)):
+            out.append((k, f.deriv_index))
+    return out
+
+
+def _innermost_tensor(expr: TensorExpr) -> Tensor | None:
+    """PartialDeriv/CovariantDeriv 안쪽의 Tensor leaf를 단일하면 반환.
+
+    여러 factor의 곱이거나 Sum이면 ``None``. transverse-slot 검사용 한정 helper.
+    """
+    cur = expr
+    while isinstance(cur, (PartialDeriv, CovariantDeriv)):
+        cur = cur.expr
+    if isinstance(cur, Tensor):
+        return cur
+    return None
+
+
+def is_zero_by_transverse_deriv(expr: TensorExpr, mreg=None) -> TensorExpr:
+    """Tensor의 ``transverse`` slot이 deriv index와 contract하면 ZeroTensor.
+
+    예: ``∂^i BV_i = 0`` (BV.transverse=[0]).
+
+    두 가지 contraction 경로를 인식:
+        (A) **Direct** — 어떤 factor가 PartialDeriv/CovariantDeriv이고, 그
+            안쪽 Tensor T가 ``T.transverse`` slot s를 가지며, deriv_index name이
+            T.indices[s].name과 같다 (positions opposite). 이 경우엔 ``mreg``
+            불필요.
+        (B) **Via single metric** — TensorProduct 안에서, deriv_index name
+            n_d와 어떤 transverse slot의 name n_t가 metric tensor M의 두
+            인덱스 이름과 정확히 일치하여 ``γ^{n_d n_t}`` 가 둘을 raising
+            contraction으로 묶는다. 이 경우엔 ``mreg`` 필요.
+
+    조건 만족 시 ``ZeroTensor(expr.free_indices)`` 반환.
+    """
+    # Case (A): 단일 PartialDeriv/CovariantDeriv를 직접 검사 (TensorProduct 아닐 수도)
+    if isinstance(expr, (PartialDeriv, CovariantDeriv)):
+        T = _innermost_tensor(expr)
+        if T is not None and T.transverse:
+            # deriv 누적 인덱스 모두 모음
+            cur = expr
+            deriv_names: list[tuple[str, object]] = []
+            while isinstance(cur, (PartialDeriv, CovariantDeriv)):
+                deriv_names.append((cur.deriv_index.name, cur.deriv_index.space))
+                cur = cur.expr
+            for s in T.transverse:
+                t_name = T.indices[s].name
+                t_space = T.indices[s].space
+                t_pos = T.indices[s].position
+                for d_name, d_space in deriv_names:
+                    # deriv_index는 항상 lower; T의 transverse slot이 upper면 contract
+                    if d_name == t_name and d_space == t_space and t_pos == "upper":
+                        return ZeroTensor(expr.free_indices)
+        return expr
+
+    if not isinstance(expr, TensorProduct):
+        return expr
+
+    factors = collect_factors(expr)
+    deriv_pairs = _collect_deriv_indices(factors)
+    if not deriv_pairs:
+        return expr
+
+    name_counts = _index_name_count(factors)
+    free_names = {idx.name for idx in expr.free_indices}
+
+    # transverse slot 정보 모음: (name, space, position)
+    transverse_slots: list[tuple[str, object, str]] = []
+    for f in factors:
+        T = _innermost_tensor(f) if isinstance(f, (PartialDeriv, CovariantDeriv)) else f
+        if isinstance(T, Tensor):
+            for s in T.transverse:
+                idx = T.indices[s]
+                transverse_slots.append((idx.name, idx.space, idx.position))
+
+    for _, d_idx in deriv_pairs:
+        d_name = d_idx.name
+        d_space = d_idx.space
+        # Case (A) — direct contraction: deriv name == transverse slot name (opposite pos)
+        for t_name, t_space, t_pos in transverse_slots:
+            if d_space != t_space:
+                continue
+            if d_name == t_name and t_pos == "upper":
+                # 둘 다 dummy 인지 확인
+                if d_name in free_names:
+                    continue
+                if name_counts.get(d_name, 0) != 2:
+                    continue
+                return ZeroTensor(expr.free_indices)
+
+        # Case (B) — via single metric
+        if mreg is None:
+            continue
+        for M in factors:
+            if not isinstance(M, Tensor) or len(M.indices) != 2:
+                continue
+            space = mreg.is_metric(M)
+            if space is None or space != d_space:
+                continue
+            m_names = {M.indices[0].name, M.indices[1].name}
+            if d_name not in m_names:
+                continue
+            other = next(iter(m_names - {d_name}))
+            if d_name == other:
+                continue
+            for t_name, t_space, t_pos in transverse_slots:
+                if t_space != d_space:
+                    continue
+                if t_name != other:
+                    continue
+                if d_name in free_names or other in free_names:
+                    continue
+                if name_counts.get(d_name, 0) != 2 or name_counts.get(other, 0) != 2:
+                    continue
                 return ZeroTensor(expr.free_indices)
 
     return expr
@@ -854,22 +1049,33 @@ def collect_scalar_terms(expr: TensorExpr) -> TensorExpr:
 # ─── simplify (top-level) ───────────────────────────────────
 
 
-def simplify(expr: TensorExpr) -> TensorExpr:
+def simplify(expr: TensorExpr, mreg=None) -> TensorExpr:
     """모든 정규화 규칙을 fixed-point까지 적용한다.
 
-    적용 규칙 (M2.5 + M3):
+    적용 규칙 (M2.5 + M3 + G5):
         - 재귀: TensorSum / ScalarMul / TensorProduct.
         - is_zero_by_antisym_swap (M2: antisym × sym = 0).
+          ``Tensor.symmetric_pairs`` slot이 _factor_key_no_swap에서 정렬되므로
+          symmetric_pairs 속성도 자동으로 패턴에 사용된다.
+        - is_zero_by_traceless_metric (G5a, ``mreg`` 필요).
+        - is_zero_by_transverse_deriv (G5b, ``mreg`` 있으면 metric-경유 case도).
         - pull_scalars (M3: ScalarMul hoist).
         - collect_scalar_terms (M3: TensorSum 같은 body 합산).
         - ZeroTensor 흡수 (variation.py).
+
+    Parameters
+    ----------
+    expr : TensorExpr
+    mreg : MetricRegistry, optional
+        Provided 시 ``traceless × metric → 0``과 ``transverse × ∂ via metric →
+        0`` rule들이 활성화된다.
     """
     from indexcalc.core.variation import _simplify_zeros
 
     cur = expr
     for _ in range(20):  # max 20 passes — guards against rule-cycle
         prev = cur
-        cur = _simplify_once(cur)
+        cur = _simplify_once(cur, mreg)
         cur = distribute_products(cur)
         cur = pull_scalars(cur)
         cur = commute_partial_through_constants(cur)
@@ -880,24 +1086,35 @@ def simplify(expr: TensorExpr) -> TensorExpr:
     return cur
 
 
-def _simplify_once(expr: TensorExpr) -> TensorExpr:
+def _simplify_once(expr: TensorExpr, mreg=None) -> TensorExpr:
     """한 번의 simplify pass (재귀 + 한정된 규칙 적용)."""
     if isinstance(expr, TensorProduct):
-        new_l = _simplify_once(expr.left)
-        new_r = _simplify_once(expr.right)
+        new_l = _simplify_once(expr.left, mreg)
+        new_r = _simplify_once(expr.right, mreg)
         prod = TensorProduct(new_l, new_r) if (new_l is not expr.left or new_r is not expr.right) else expr
         # antisym swap 0-detection을 product에 적용
         zero_check = is_zero_by_antisym_swap(prod)
+        if isinstance(zero_check, ZeroTensor):
+            return zero_check
+        # G5 rules
+        zero_check = is_zero_by_traceless_metric(zero_check, mreg)
+        if isinstance(zero_check, ZeroTensor):
+            return zero_check
+        zero_check = is_zero_by_transverse_deriv(zero_check, mreg)
         return zero_check
     if isinstance(expr, TensorSum):
-        new_l = _simplify_once(expr.left)
-        new_r = _simplify_once(expr.right)
+        new_l = _simplify_once(expr.left, mreg)
+        new_r = _simplify_once(expr.right, mreg)
         if new_l is not expr.left or new_r is not expr.right:
             return TensorSum(new_l, new_r)
         return expr
     if isinstance(expr, ScalarMul):
-        new_inner = _simplify_once(expr.expr)
+        new_inner = _simplify_once(expr.expr, mreg)
         if new_inner is not expr.expr:
             return ScalarMul(expr.scalar, new_inner)
         return expr
+    if isinstance(expr, (PartialDeriv, CovariantDeriv)):
+        # Direct case (A): unwrapped Deriv(T) with transverse slot
+        zero_check = is_zero_by_transverse_deriv(expr, mreg)
+        return zero_check
     return expr

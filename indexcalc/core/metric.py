@@ -74,6 +74,31 @@ class MetricRegistry:
                         return idx.space
         return None
 
+    def is_inverse_metric(self, tensor: Tensor) -> IndexSpace | None:
+        """이 텐서가 등록된 **inverse** metric (모든 인덱스 upper, 등록된 inverse
+        name과 일치)인지 확인한다.
+
+        ``is_metric``과 달리 covariant g_{μν}는 인식하지 않는다 — G6의
+        ``δg^{μν} → −g^{μρ}g^{νσ}δg_{ρσ}`` 자동 치환에서 inverse metric만
+        타게팅하는 용도.
+
+        Returns
+        -------
+        IndexSpace | None
+            inverse metric이면 해당 공간, 아니면 None.
+        """
+        if len(tensor.indices) != 2:
+            return None
+        if not all(idx.position == "upper" for idx in tensor.indices):
+            return None
+        for space_name, (_met, inv) in self._registry.items():
+            if tensor.name != inv.name:
+                continue
+            for idx in tensor.indices:
+                if idx.space.name == space_name:
+                    return idx.space
+        return None
+
 
 # ─── Dummy index 생성 ────────────────────────────────────────
 

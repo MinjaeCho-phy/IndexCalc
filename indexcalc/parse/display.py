@@ -176,13 +176,35 @@ def _format_indices(indices: tuple[Index, ...] | list[Index]) -> str:
 
 # ─── 스칼라 포매팅 ────────────────────────────────────────────
 
+def _scalar_is_negative(value) -> bool:
+    """display용: 스칼라가 '음수처럼' 보이면 True (음수 부호 추출 가능)."""
+    try:
+        import sympy as _sp
+        if isinstance(value, _sp.Basic):
+            return bool(value.could_extract_minus_sign())
+    except ImportError:
+        pass
+    try:
+        return value < 0
+    except TypeError:
+        return False
+
+
 def _format_scalar(value) -> str:
     """스칼라 값을 LaTeX로 변환한다.
 
-    깔끔한 분수이면 \\frac, 아니면 숫자 그대로.
+    깔끔한 분수이면 \\frac, SymPy 표현식이면 ``sympy.latex``, 아니면 숫자 그대로.
     """
     if isinstance(value, int):
         return str(value)
+
+    # SymPy 표현식 (Symbol, Rational, Mul, Pow, ...) — sympy.latex 위임
+    try:
+        import sympy as _sp
+        if isinstance(value, _sp.Basic):
+            return _sp.latex(value)
+    except ImportError:
+        pass
 
     # float → 깔끔한 분수 시도
     try:
@@ -194,7 +216,7 @@ def _format_scalar(value) -> str:
             num = abs(frac.numerator)
             den = frac.denominator
             return f"{sign}\\frac{{{num}}}{{{den}}}"
-    except (ValueError, OverflowError):
+    except (ValueError, OverflowError, TypeError):
         pass
 
     return f"{value}"
@@ -266,7 +288,7 @@ def to_latex(expr: TensorExpr) -> str:
         if isinstance(right_expr, ScalarMul) and right_expr.scalar == -1:
             right = to_latex(right_expr.expr)
             return f"{left} - {right}"
-        if isinstance(right_expr, ScalarMul) and right_expr.scalar < 0:
+        if isinstance(right_expr, ScalarMul) and _scalar_is_negative(right_expr.scalar):
             # -n * X → "- n X"
             pos_scalar = -right_expr.scalar
             inner = to_latex(right_expr.expr)
@@ -321,6 +343,22 @@ def to_latex(expr: TensorExpr) -> str:
     if isinstance(expr, Variation):
         inner = to_latex(expr.expr)
         return f"\\delta({inner})"
+
+    # TimeDeriv (ADM): ∂_t T (no free index for t)
+    from indexcalc.adm import TimeDeriv, LieDeriv
+    if isinstance(expr, TimeDeriv):
+        inner = to_latex(expr.expr)
+        if isinstance(expr.expr, (TensorProduct, TensorSum)):
+            inner = f"({inner})"
+        return f"\\partial_t {inner}"
+
+    # LieDeriv (ADM/general): L_X T
+    if isinstance(expr, LieDeriv):
+        vec = to_latex(expr.vector)
+        inner = to_latex(expr.expr)
+        if isinstance(expr.expr, (TensorProduct, TensorSum)):
+            inner = f"({inner})"
+        return f"\\mathcal{{L}}_{{{vec}}} {inner}"
 
     # PartialDeriv: ∂_μ T^ν_λ
     from indexcalc.core.deriv import PartialDeriv, CovariantDeriv
