@@ -233,8 +233,34 @@ def to_latex(expr: TensorExpr) -> str:
         return f"{left} {right}"
 
     if isinstance(expr, TensorSum):
-        left = to_latex(expr.left)
         right_expr = expr.right
+        # 중첩 ScalarMul collapse: c·(d·X) → (c·d)·X
+        while (
+            isinstance(right_expr, ScalarMul)
+            and isinstance(right_expr.expr, ScalarMul)
+        ):
+            right_expr = ScalarMul(
+                right_expr.scalar * right_expr.expr.scalar,
+                right_expr.expr.expr,
+            )
+
+        # right가 음수 ScalarMul이면서 그 안에 TensorSum이 있으면 평탄화.
+        # ScalarMul(c<0, TensorSum(A, B)) 를 (left + ScalarMul(c, A)) + ScalarMul(c, B)
+        # 형태로 변환해서 부호가 모든 항에 정확히 전파되도록 한다.
+        if (
+            isinstance(right_expr, ScalarMul)
+            and isinstance(right_expr.scalar, (int, float))
+            and right_expr.scalar < 0
+            and isinstance(right_expr.expr, TensorSum)
+        ):
+            new_left = TensorSum(
+                expr.left,
+                ScalarMul(right_expr.scalar, right_expr.expr.left),
+            )
+            new_right = ScalarMul(right_expr.scalar, right_expr.expr.right)
+            return to_latex(TensorSum(new_left, new_right))
+
+        left = to_latex(expr.left)
 
         # 오른쪽이 -1 * X 형태면 "- X"로 표시
         if isinstance(right_expr, ScalarMul) and right_expr.scalar == -1:
@@ -253,6 +279,20 @@ def to_latex(expr: TensorExpr) -> str:
         return f"{left} + {right}"
 
     if isinstance(expr, ScalarMul):
+        # 중첩 ScalarMul 결합: c·(d·X) → (c·d)·X
+        if isinstance(expr.expr, ScalarMul):
+            return to_latex(ScalarMul(
+                expr.scalar * expr.expr.scalar, expr.expr.expr,
+            ))
+        # c·(A+B) → cA + cB 로 분배해서 출력
+        # (TensorSum 컨텍스트에서 - 부호 처리가 정확히 되도록)
+        if isinstance(expr.expr, TensorSum):
+            distributed = TensorSum(
+                ScalarMul(expr.scalar, expr.expr.left),
+                ScalarMul(expr.scalar, expr.expr.right),
+            )
+            return to_latex(distributed)
+
         coeff = _format_scalar(expr.scalar)
         inner = to_latex(expr.expr)
 
