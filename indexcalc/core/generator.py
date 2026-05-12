@@ -33,7 +33,7 @@ from typing import Callable, Optional
 
 from indexcalc.core.group import Group, Representation
 from indexcalc.core.index import Index, IndexSpace
-from indexcalc.core.tensor import Tensor, TensorExpr, TensorProduct, ScalarMul
+from indexcalc.core.tensor import Tensor, TensorExpr, TensorProduct, TensorSum, ScalarMul
 from indexcalc.core.variation import ZeroTensor
 
 
@@ -413,11 +413,15 @@ def lorentz_vector_action(
     parameter_names: tuple = ("a", "b"),
     generator_name: str = "M_vec",
 ) -> ActionFn:
-    """Lorentz vector rep 작용 ($SO(1, D-1)$ on 4-vectors).
+    """Lorentz vector rep 작용 ($SO(1, D-1)$ on 4-vectors and rank-≥1 tensors).
 
-    Convention:
-        $\\delta V^\\mu = (M^{ab})^\\mu{}_\\nu V^\\nu$  (vector upper)
-        $\\delta V_\\mu = -V_\\nu (M^{ab})^\\nu{}_\\mu$  (vector lower)
+    Convention (per slot):
+        $\\delta V^\\mu = (M^{ab})^\\mu{}_\\nu V^\\nu$  (frame slot upper)
+        $\\delta V_\\mu = -V_\\nu (M^{ab})^\\nu{}_\\mu$  (frame slot lower)
+
+    Multi-frame-index 필드 ($T^{\\mu\\nu}$, $W^A_{\\mu\\nu}$ 등) 는 **Leibniz** —
+    각 frame slot 마다 한 항씩 만들어 모두 합산한다. 비-frame 인덱스
+    (예: $W$의 SU(2) adj 인덱스, spinor 등) 는 그대로 유지.
 
     $M^{ab}$는 vector rep matrix tensor — adj 인덱스 (a, b) antisym + frame
     (row, col). 구체적 components ($M^{ab}_{\\mu\\nu} = i(\\eta^{a\\mu}\\delta^b_\\nu - \\eta^{b\\mu}\\delta^a_\\nu)$)
@@ -425,64 +429,67 @@ def lorentz_vector_action(
     """
     a_name, b_name = parameter_names
 
-    def action(field: Tensor) -> TensorExpr:
-        frame_indices = [
-            (i, idx) for i, idx in enumerate(field.indices)
-            if idx.space == frame_space
-        ]
-        if len(frame_indices) != 1:
-            raise ValueError(
-                f"lorentz_vector_action: field {field.name!r} expected to have "
-                f"exactly one index in {frame_space.name!r}, got {len(frame_indices)}"
-            )
-        slot, fr_idx = frame_indices[0]
+    def _rotate_slot(field: Tensor, slot: int) -> TensorExpr:
+        fr_idx = field.indices[slot]
         position = fr_idx.position
-
-        # globally unique dummy
         dummy = _fresh_dummy_name()
 
+        new_indices = list(field.indices)
+        renamed_pos = "upper" if position == "upper" else "lower"
+        new_indices[slot] = Index(dummy, frame_space, renamed_pos)
+        renamed = Tensor(
+            field.name, new_indices,
+            antisymmetric_pairs=list(field.antisymmetric_pairs),
+            symmetric_pairs=list(field.symmetric_pairs),
+            traceless=list(field.traceless),
+            transverse=list(field.transverse),
+            reps=dict(field.reps),
+            statistics=field.statistics,
+        )
+
         if position == "upper":
-            # δ V^μ = M^{ab,μ}_ν V^ν  →  (M, V_renamed) product, scalar 1
+            # δ V^μ = M^{ab,μ}_ν V^ν
             M = Tensor(
                 generator_name,
                 [
                     Index(a_name, frame_space, "upper"),
                     Index(b_name, frame_space, "upper"),
-                    Index(fr_idx.name, frame_space, "upper"),  # row matches input
-                    Index(dummy, frame_space, "lower"),  # col contracts with renamed
+                    Index(fr_idx.name, frame_space, "upper"),
+                    Index(dummy, frame_space, "lower"),
                 ],
                 antisymmetric_pairs=[(0, 1)],
             )
-            new_indices = list(field.indices)
-            new_indices[slot] = Index(dummy, frame_space, "upper")
-            renamed = Tensor(
-                field.name, new_indices,
-                antisymmetric_pairs=list(field.antisymmetric_pairs),
-                reps=dict(field.reps),
-                statistics=field.statistics,
-            )
             return TensorProduct(M, renamed)
-        else:  # lower
+        else:
             # δ V_μ = -V_ν M^{ab,ν}_μ
             M = Tensor(
                 generator_name,
                 [
                     Index(a_name, frame_space, "upper"),
                     Index(b_name, frame_space, "upper"),
-                    Index(dummy, frame_space, "upper"),  # row contracts with renamed
-                    Index(fr_idx.name, frame_space, "lower"),  # col matches input
+                    Index(dummy, frame_space, "upper"),
+                    Index(fr_idx.name, frame_space, "lower"),
                 ],
                 antisymmetric_pairs=[(0, 1)],
             )
-            new_indices = list(field.indices)
-            new_indices[slot] = Index(dummy, frame_space, "lower")
-            renamed = Tensor(
-                field.name, new_indices,
-                antisymmetric_pairs=list(field.antisymmetric_pairs),
-                reps=dict(field.reps),
-                statistics=field.statistics,
-            )
             return ScalarMul(-1.0, TensorProduct(renamed, M))
+
+    def action(field: Tensor) -> TensorExpr:
+        frame_slots = [
+            i for i, idx in enumerate(field.indices)
+            if idx.space == frame_space
+        ]
+        if len(frame_slots) == 0:
+            raise ValueError(
+                f"lorentz_vector_action: field {field.name!r} has no index in "
+                f"{frame_space.name!r}; vector rep requires ≥1 frame slot"
+            )
+
+        terms = [_rotate_slot(field, slot) for slot in frame_slots]
+        result = terms[0]
+        for t in terms[1:]:
+            result = TensorSum(result, t)
+        return result
 
     return action
 

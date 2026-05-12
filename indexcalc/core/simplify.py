@@ -569,6 +569,20 @@ def distribute_products(expr: TensorExpr) -> TensorExpr:
             return ScalarMul(expr.scalar, inner)
         return expr
 
+    if isinstance(expr, PartialDeriv):
+        # ∂(A + B) → ∂A + ∂B  (linearity of partial derivative)
+        inner = distribute_products(expr.expr)
+        if isinstance(inner, TensorSum):
+            return distribute_products(
+                TensorSum(
+                    PartialDeriv(inner.left, expr.deriv_index),
+                    PartialDeriv(inner.right, expr.deriv_index),
+                )
+            )
+        if inner is not expr.expr:
+            return PartialDeriv(inner, expr.deriv_index)
+        return expr
+
     return expr
 
 
