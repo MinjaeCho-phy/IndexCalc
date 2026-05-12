@@ -1079,6 +1079,7 @@ def simplify(expr: TensorExpr, mreg=None) -> TensorExpr:
         cur = distribute_products(cur)
         cur = pull_scalars(cur)
         cur = commute_partial_through_constants(cur)
+        cur = apply_clifford_sigma_gamma(cur)
         cur = collect_scalar_terms(cur)
         cur = _simplify_zeros(cur)
         if cur is prev:
