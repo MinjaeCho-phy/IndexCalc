@@ -576,6 +576,16 @@ def make_lorentz_spinor_generator(
         gen.declare_action("spinor", spinor_act)
     if group.has_rep("conj_spinor"):
         gen.declare_action("conj_spinor", spinor_act)
+    # Chiral reps share the same Σ action — chirality is a separate quantum
+    # number tracked at the field-tag level; under proper Lorentz the Σ
+    # rotation acts identically on LH/RH spinors. {γ_5, Σ^{ab}} = 0 vanishes
+    # since Σ ~ [γ^a, γ^b].
+    for chiral_rep in ("L_spinor", "R_spinor"):
+        if group.has_rep(chiral_rep):
+            gen.declare_action(chiral_rep, spinor_act)
+    for chiral_conj in ("conj_L_spinor", "conj_R_spinor"):
+        if group.has_rep(chiral_conj):
+            gen.declare_action(chiral_conj, spinor_act)
     if group.has_rep("vector"):
         gen.declare_action("vector", vector_act)
     if group.has_rep("singlet"):

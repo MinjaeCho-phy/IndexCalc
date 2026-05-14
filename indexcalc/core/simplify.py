@@ -970,6 +970,174 @@ def apply_clifford_sigma_gamma(
     return TensorSum(term1, term2)
 
 
+def _find_T_epsilon_pair(
+    factors: list[TensorExpr],
+    rep_matrix_name: str,
+    epsilon_name: str,
+) -> tuple[int, int] | None:
+    """T (3-index rep matrix) 와 ε (2-index totally antisym invariant) 가 같은
+    fund space 의 dummy 한 개로 contract 된 쌍을 찾는다.
+
+    T convention: ``(adj_param ↑, fund_row ↑, fund_col ↓)``.
+    ε convention: ``(fund ↓, fund ↓)`` totally antisymmetric.
+    T.row(↑) 와 ε 의 두 slot 중 하나(↓) 가 같은 이름 + 같은 IndexSpace 면 매칭.
+    """
+    for i, T in enumerate(factors):
+        if not (
+            isinstance(T, Tensor)
+            and T.name == rep_matrix_name
+            and len(T.indices) == 3
+        ):
+            continue
+        T_row = T.indices[1]
+        if T_row.position != "upper":
+            continue
+        for j, E in enumerate(factors):
+            if i == j or not isinstance(E, Tensor):
+                continue
+            if E.name != epsilon_name or len(E.indices) != 2:
+                continue
+            # ε 가 antisymmetric 인지 확인 (둘 다 ↓)
+            if E.indices[0].position != "lower" or E.indices[1].position != "lower":
+                continue
+            if not E.antisymmetric_pairs:
+                continue
+            if E.indices[0].space != T_row.space:
+                continue
+            if T_row.name == E.indices[0].name or T_row.name == E.indices[1].name:
+                return (i, j)
+    return None
+
+
+def apply_epsilon_su_n_invariance(
+    expr: TensorExpr,
+    rep_matrix_name: str = "T",
+    epsilon_name: str = "epsilon",
+) -> TensorExpr:
+    """SU(N) ε invariance identity 를 normalizer 로 사용해 Leibniz 항을 통일된
+    contraction graph 로 변환한다.
+
+    배경:
+        ε_{ij...} 는 SU(N) fund rep 의 totally antisymmetric invariant.
+        $(T^a)^p{}_q \\epsilon_{p j} + (T^a)^p{}_j \\epsilon_{q p} = 0$
+        $\\Leftrightarrow (T^a)^p{}_q \\epsilon_{pj} = (T^a)^p{}_j \\epsilon_{pq}$
+        (using $\\epsilon$ antisymmetry).
+
+    이 identity 와 ε antisymmetry 만으로, $\\delta_a(\\bar L^i H^j \\epsilon_{ij} e_R)$
+    의 두 Leibniz 항 ((T 가 \\bar L 에 작용한 항) + (T 가 H 에 작용한 항))을
+    같은 canonical contraction graph 로 정규화 가능 → ``collect_scalar_terms`` 가
+    +i, -i 합산 → 0.
+
+    Normalization 2 단계:
+        1. **ε antisym normalize**: T.row 의 이름과 매칭되는 ε slot 이 slot1
+           이면, ε 의 두 slot 을 swap 하고 containing ``ScalarMul`` 의 부호를 -1
+           곱한다. 결과: T.row ↔ ε.slot0 가 항상 성립.
+        2. **Lexicographic identity rewrite**: T.col 과 contract 되는 외부 factor
+           X (이름) 와 ε.slot1 과 contract 되는 외부 factor Y (이름) 를 식별.
+           ``X.name > Y.name`` 이면 identity 를 적용해 T.col 이름 ↔ ε.slot1 이름을
+           swap (factor X, Y 자체는 그대로). 결과적으로 contraction graph 가
+           lexicographically 가장 작은 이름이 T.col 에 contract 되는 form 으로
+           통일.
+
+    Tradeoff: 두 단계 모두 적용해도 한 ε 와 한 T 가 있는 단일 항에 대해서만
+    작동. 여러 T (multi-Leibniz) 또는 여러 ε 가 있는 경우엔 더 일반화 필요 —
+    M8 사용 케이스 ($\\bar L H \\epsilon e_R$) 에는 충분.
+    """
+    if isinstance(expr, TensorSum):
+        new_l = apply_epsilon_su_n_invariance(expr.left, rep_matrix_name, epsilon_name)
+        new_r = apply_epsilon_su_n_invariance(expr.right, rep_matrix_name, epsilon_name)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+
+    if isinstance(expr, ScalarMul):
+        new_inner = apply_epsilon_su_n_invariance(expr.expr, rep_matrix_name, epsilon_name)
+        if isinstance(new_inner, ScalarMul):
+            # 부호 흡수: 외부 scalar * 내부 scalar
+            return ScalarMul(expr.scalar * new_inner.scalar, new_inner.expr)
+        if new_inner is not expr.expr:
+            return ScalarMul(expr.scalar, new_inner)
+        return expr
+
+    if not isinstance(expr, TensorProduct):
+        return expr
+
+    factors = collect_factors(expr)
+    pair = _find_T_epsilon_pair(factors, rep_matrix_name, epsilon_name)
+    if pair is None:
+        return expr
+    i_T, j_eps = pair
+    T = factors[i_T]
+    eps = factors[j_eps]
+    fund_space = T.indices[2].space
+
+    # Step 1: ε antisym normalize — T.row ↔ ε.slot0
+    sign = 1
+    T_row_name = T.indices[1].name
+    if T_row_name == eps.indices[1].name:
+        new_eps = Tensor(
+            eps.name,
+            [eps.indices[1], eps.indices[0]],
+            antisymmetric_pairs=list(eps.antisymmetric_pairs),
+            reps=dict(eps.reps),
+            statistics=eps.statistics,
+        )
+        factors[j_eps] = new_eps
+        eps = new_eps
+        sign = -1
+    # else: already T.row ↔ ε.slot0
+
+    # Step 2: Identify X (T.col contraction partner) and Y (ε.slot1 partner).
+    T_col_name = T.indices[2].name
+    eps_s1_name = eps.indices[1].name
+
+    X_idx = Y_idx = None
+    for k, f in enumerate(factors):
+        if k == i_T or k == j_eps or not isinstance(f, Tensor):
+            continue
+        for idx in f.indices:
+            if idx.space == fund_space:
+                if idx.name == T_col_name and idx.position == "upper":
+                    X_idx = k
+                if idx.name == eps_s1_name and idx.position == "upper":
+                    Y_idx = k
+
+    # 두 partner 가 모두 식별되고 서로 다를 때만 lex normalize 가능.
+    if X_idx is not None and Y_idx is not None and X_idx != Y_idx:
+        X = factors[X_idx]
+        Y = factors[Y_idx]
+        if X.name > Y.name:
+            # Identity: swap T.col name <-> ε.slot1 name.
+            new_T = Tensor(
+                T.name,
+                [
+                    T.indices[0],
+                    T.indices[1],
+                    Index(eps_s1_name, fund_space, "lower"),
+                ],
+                antisymmetric_pairs=list(T.antisymmetric_pairs),
+                reps=dict(T.reps),
+                statistics=T.statistics,
+            )
+            new_eps2 = Tensor(
+                eps.name,
+                [
+                    eps.indices[0],
+                    Index(T_col_name, fund_space, "lower"),
+                ],
+                antisymmetric_pairs=list(eps.antisymmetric_pairs),
+                reps=dict(eps.reps),
+                statistics=eps.statistics,
+            )
+            factors[i_T] = new_T
+            factors[j_eps] = new_eps2
+
+    result = _product_of_factors(factors)
+    if sign == -1:
+        result = ScalarMul(-1, result)
+    return result
+
+
 def _flatten_sum(expr: TensorExpr) -> list[TensorExpr]:
     """``TensorSum`` 트리를 평탄한 summand 리스트로 변환."""
     if isinstance(expr, TensorSum):
@@ -1094,6 +1262,7 @@ def simplify(expr: TensorExpr, mreg=None) -> TensorExpr:
         cur = pull_scalars(cur)
         cur = commute_partial_through_constants(cur)
         cur = apply_clifford_sigma_gamma(cur)
+        cur = apply_epsilon_su_n_invariance(cur)
         cur = collect_scalar_terms(cur)
         cur = _simplify_zeros(cur)
         if cur is prev:
