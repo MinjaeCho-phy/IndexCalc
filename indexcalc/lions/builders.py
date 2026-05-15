@@ -49,6 +49,18 @@ def make_epsilon_su2(
     )
 
 
+def make_epsilon_su2_upper(
+    fund_space: IndexSpace, i: str = "i", j: str = "j",
+) -> Tensor:
+    """ε^{ij} — SU(2) fundamental antisymmetric invariant (both slots upper)."""
+    return Tensor(
+        "epsilon",
+        [fund_space.upper(i), fund_space.upper(j)],
+        antisymmetric_pairs=[(0, 1)],
+        reps={},
+    )
+
+
 def make_partial(field: Tensor, spacetime: IndexSpace, mu: str = "μ") -> PartialDeriv:
     """∂_μ on the given field, picking lower spacetime index name μ."""
     return partial(field, spacetime.lower(mu))
