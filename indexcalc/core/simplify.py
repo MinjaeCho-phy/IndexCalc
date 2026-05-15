@@ -1367,6 +1367,114 @@ def apply_gamma5_gamma_anticommute(
     return ScalarMul(-1, _product_of_factors(new_factors))
 
 
+def _find_sigma_projector_pair(
+    factors: list[TensorExpr],
+    sigma_name: str,
+) -> tuple[int, int] | None:
+    """Σ (4-index: a↑,b↑,row↑,col↓) 가 인접 spinor invariant projector
+    (`P_L`/`P_R`/`gamma_5`, 2-index) 의 row 와 contract 된 쌍 (Σ, P).
+
+    Σ.col(slot 3, ↓spinor) ↔ P.row(slot 0, ↑spinor), 같은 spinor space.
+    """
+    for i, fi in enumerate(factors):
+        if not (
+            isinstance(fi, Tensor)
+            and fi.name == sigma_name
+            and len(fi.indices) == 4
+        ):
+            continue
+        sigma_col = fi.indices[3]
+        if sigma_col.position != "lower":
+            continue
+        for j, fj in enumerate(factors):
+            if i == j:
+                continue
+            if not _is_projector_factor(fj):
+                continue
+            p_row = fj.indices[0]
+            if (
+                p_row.name == sigma_col.name
+                and p_row.space == sigma_col.space
+            ):
+                return (i, j)
+    return None
+
+
+def apply_sigma_projector_commute(
+    expr: TensorExpr,
+    sigma_name: str = "Sigma",
+) -> TensorExpr:
+    """[Σ^{ab}, P_L] = [Σ^{ab}, P_R] = [Σ^{ab}, γ_5] = 0 →
+    push Σ past chiral projectors / γ_5 to the right.
+
+    .. math::
+        \\Sigma^{ab,\\alpha}{}_\\beta\\, P^\\beta{}_\\gamma
+        \\;\\to\\;
+        P^\\alpha{}_\\rho\\, \\Sigma^{ab,\\rho}{}_\\gamma
+
+    Σ 가 짝수 개의 γ → γ_5 (그리고 P_{L,R}) 와 commute. 한 쌍씩 처리,
+    fixed-point loop 에서 반복.
+    """
+    if isinstance(expr, TensorSum):
+        new_l = apply_sigma_projector_commute(expr.left, sigma_name)
+        new_r = apply_sigma_projector_commute(expr.right, sigma_name)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+    if isinstance(expr, ScalarMul):
+        new_inner = apply_sigma_projector_commute(expr.expr, sigma_name)
+        if new_inner is not expr.expr:
+            return ScalarMul(expr.scalar, new_inner)
+        return expr
+    if not isinstance(expr, TensorProduct):
+        return expr
+
+    factors = collect_factors(expr)
+    pair = _find_sigma_projector_pair(factors, sigma_name)
+    if pair is None:
+        new_l = apply_sigma_projector_commute(expr.left, sigma_name)
+        new_r = apply_sigma_projector_commute(expr.right, sigma_name)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorProduct(new_l, new_r)
+        return expr
+
+    i_sigma, j_p = pair
+    sigma = factors[i_sigma]
+    p = factors[j_p]
+    spinor_space = sigma.indices[2].space
+    sigma_row_name = sigma.indices[2].name  # α (outer left, → ψ̄)
+    p_col_name = p.indices[1].name           # γ (outer right, → ψ)
+    new_dummy = _fresh_swap_dummy()
+
+    new_p = Tensor(
+        p.name,
+        [
+            Index(sigma_row_name, spinor_space, "upper"),  # α (was Σ.row)
+            Index(new_dummy, spinor_space, "lower"),        # ρ (new dummy)
+        ],
+        antisymmetric_pairs=list(p.antisymmetric_pairs),
+        reps=dict(p.reps),
+        statistics=p.statistics,
+    )
+    new_sigma = Tensor(
+        sigma.name,
+        [
+            sigma.indices[0],                                  # a↑frame
+            sigma.indices[1],                                  # b↑frame
+            Index(new_dummy, spinor_space, "upper"),           # ρ
+            Index(p_col_name, spinor_space, "lower"),          # γ (was P.col)
+        ],
+        antisymmetric_pairs=list(sigma.antisymmetric_pairs),
+        reps=dict(sigma.reps),
+        statistics=sigma.statistics,
+    )
+
+    new_factors = list(factors)
+    new_factors[i_sigma] = new_p
+    new_factors[j_p] = new_sigma
+    return _product_of_factors(new_factors)
+
+
 def _flatten_sum(expr: TensorExpr) -> list[TensorExpr]:
     """``TensorSum`` 트리를 평탄한 summand 리스트로 변환."""
     if isinstance(expr, TensorSum):
@@ -1492,6 +1600,7 @@ def simplify(expr: TensorExpr, mreg=None) -> TensorExpr:
         cur = commute_partial_through_constants(cur)
         cur = apply_clifford_sigma_gamma(cur)
         cur = apply_gamma5_gamma_anticommute(cur)
+        cur = apply_sigma_projector_commute(cur)
         cur = apply_chiral_projector_identities(cur)
         cur = apply_epsilon_su_n_invariance(cur)
         cur = collect_scalar_terms(cur)
