@@ -15,6 +15,7 @@ import pytest
 
 from indexcalc.core.index import IndexSpace, Index
 from indexcalc.core.tensor import Tensor, TensorProduct, ScalarMul
+from indexcalc.core.deriv import partial
 from indexcalc.core.variation import ZeroTensor
 from indexcalc.core.group import Group
 from indexcalc.core.generator import make_lorentz_spinor_generator
@@ -67,6 +68,15 @@ def make_P_R(dirac, up="α", down="β"):
 
 def make_gamma_5(dirac, up="α", down="β"):
     return Tensor("gamma_5", [dirac.upper(up), dirac.lower(down)], reps={})
+
+
+def make_gamma(st, dirac, mu="μ", up="α", down="β"):
+    """γ^μ — invariant frame+spinor tensor."""
+    return Tensor(
+        "gamma",
+        [st.upper(mu), dirac.upper(up), dirac.lower(down)],
+        reps={},
+    )
 
 
 def make_Sigma(st, dirac, a="a", b="b", row="α", col="β"):
@@ -167,6 +177,38 @@ def test_dirac_mass_term_still_lorentz_invariant(setup):
     psi = make_psi(dirac, "α")
 
     L = TensorProduct(psibar, psi)
+    delta = apply_generator(L, gen)
+    final = simplify(delta)
+    assert isinstance(final, ZeroTensor), f"got {type(final).__name__}: {final!r}"
+
+
+# ─── 6. Chiral kinetic Lorentz invariance ──────────────────
+
+
+def test_chiral_kinetic_lorentz_invariant(setup):
+    """$\\delta_{\\rm Lorentz}\\bigl(i\\bar\\psi P_L \\gamma^\\mu \\partial_\\mu \\psi\\bigr) = 0$.
+
+    Builds on:
+    - M6.5 (`apply_clifford_sigma_gamma`): Σ·γ → γ·Σ + (-2i) M·γ.
+    - M9.5 (`apply_sigma_projector_commute`): Σ·P_L → P_L·Σ.
+    - M6 PartialDeriv vector hook: δ(∂_μ ψ) creates M·∂ term that cancels
+      M·γ via factor commutativity.
+    """
+    st, dirac, _lorentz, gen = setup
+    psibar = make_psibar(dirac, "α")
+    PL = make_P_L(dirac, "α", "β")
+    gamma = make_gamma(st, dirac, mu="μ", up="β", down="γ")
+    psi = make_psi(dirac, "γ")
+    dpsi = partial(psi, st.lower("μ"))  # ∂_μ ψ^γ — μ contracts γ-vector, γ-spinor contracts γ.col
+
+    # L = i · ψ̄_α · P_L^α{}_β · γ^{μ,β}{}_γ · ∂_μ ψ^γ
+    L = ScalarMul(
+        1j,
+        TensorProduct(
+            psibar,
+            TensorProduct(PL, TensorProduct(gamma, dpsi)),
+        ),
+    )
     delta = apply_generator(L, gen)
     final = simplify(delta)
     assert isinstance(final, ZeroTensor), f"got {type(final).__name__}: {final!r}"
