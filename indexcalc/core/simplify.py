@@ -1138,6 +1138,235 @@ def apply_epsilon_su_n_invariance(
     return result
 
 
+# ─── M9: chiral projectors + γ_5 anticommute ──────────────────
+
+
+# (left.col → right.row) → (sign, result_name) or None (= 0).
+# "delta_spinor" is a sentinel: γ_5·γ_5 → 1 (rebuilt as `delta` invariant).
+_PROJECTOR_IDENTITY_TABLE: dict[tuple[str, str], tuple[int, str] | None] = {
+    ("P_L", "P_L"): (1, "P_L"),
+    ("P_R", "P_R"): (1, "P_R"),
+    ("P_L", "P_R"): None,
+    ("P_R", "P_L"): None,
+    ("gamma_5", "P_L"): (1, "P_L"),
+    ("P_L", "gamma_5"): (1, "P_L"),
+    ("gamma_5", "P_R"): (-1, "P_R"),
+    ("P_R", "gamma_5"): (-1, "P_R"),
+    ("gamma_5", "gamma_5"): (1, "delta_spinor"),
+}
+
+_PROJECTOR_NAMES = {"P_L", "P_R", "gamma_5"}
+
+
+def _is_projector_factor(f: TensorExpr) -> bool:
+    return (
+        isinstance(f, Tensor)
+        and f.name in _PROJECTOR_NAMES
+        and len(f.indices) == 2
+        and f.indices[0].position == "upper"
+        and f.indices[1].position == "lower"
+    )
+
+
+def _find_projector_pair(
+    factors: list[TensorExpr],
+) -> tuple[int, int] | None:
+    """Adjacent (chain-wise) pair of projector/γ_5 factors.
+
+    Match: factors[i].col(slot 1, lower) name == factors[j].row(slot 0, upper)
+    name, same spinor space. (i, j) ordering is left→right in the spinor chain.
+    """
+    for i, fi in enumerate(factors):
+        if not _is_projector_factor(fi):
+            continue
+        col_i = fi.indices[1]
+        for j, fj in enumerate(factors):
+            if i == j or not _is_projector_factor(fj):
+                continue
+            if (fi.name, fj.name) not in _PROJECTOR_IDENTITY_TABLE:
+                continue
+            row_j = fj.indices[0]
+            if col_i.name == row_j.name and col_i.space == row_j.space:
+                return (i, j)
+    return None
+
+
+def apply_chiral_projector_identities(expr: TensorExpr) -> TensorExpr:
+    """Adjacent P_L/P_R/γ_5 contraction → simplification.
+
+    Patterns (left.col ↔ right.row on spinor space, see
+    ``_PROJECTOR_IDENTITY_TABLE``):
+
+    - ``P_L · P_L → P_L``, ``P_R · P_R → P_R``
+    - ``P_L · P_R → 0``, ``P_R · P_L → 0``
+    - ``γ_5 · P_L → P_L``, ``P_L · γ_5 → P_L``
+    - ``γ_5 · P_R → -P_R``, ``P_R · γ_5 → -P_R``
+    - ``γ_5 · γ_5 → 1`` (rebuilt as ``δ_spinor`` invariant tying the two
+      outside indices).
+
+    한 번에 한 쌍만 처리 — fixed-point loop 에서 반복.
+    """
+    if isinstance(expr, TensorSum):
+        new_l = apply_chiral_projector_identities(expr.left)
+        new_r = apply_chiral_projector_identities(expr.right)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+    if isinstance(expr, ScalarMul):
+        new_inner = apply_chiral_projector_identities(expr.expr)
+        if isinstance(new_inner, ZeroTensor):
+            return new_inner
+        if new_inner is not expr.expr:
+            return ScalarMul(expr.scalar, new_inner)
+        return expr
+    if not isinstance(expr, TensorProduct):
+        return expr
+
+    factors = collect_factors(expr)
+    pair = _find_projector_pair(factors)
+    if pair is None:
+        new_l = apply_chiral_projector_identities(expr.left)
+        new_r = apply_chiral_projector_identities(expr.right)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorProduct(new_l, new_r)
+        return expr
+
+    i, j = pair
+    left, right = factors[i], factors[j]
+    rule = _PROJECTOR_IDENTITY_TABLE[(left.name, right.name)]
+
+    if rule is None:
+        # P_L · P_R or P_R · P_L → 0
+        return ZeroTensor(expr.free_indices)
+
+    sign, result_name = rule
+    outer_row = left.indices[0]   # upper, attaches to left neighbour in chain
+    outer_col = right.indices[1]  # lower, attaches to right neighbour
+
+    new_factors = [f for k, f in enumerate(factors) if k != i and k != j]
+
+    if result_name == "delta_spinor":
+        merged = Tensor("delta", [outer_row, outer_col], reps={})
+    else:
+        merged = Tensor(result_name, [outer_row, outer_col], reps={})
+    new_factors.append(merged)
+
+    rebuilt = _product_of_factors(new_factors)
+    if sign == -1:
+        return ScalarMul(-1, rebuilt)
+    return rebuilt
+
+
+def _find_gamma5_gamma_pair(
+    factors: list[TensorExpr],
+    gamma5_name: str,
+    gamma_name: str,
+) -> tuple[int, int] | None:
+    """γ_5 (2-index spinor) directly followed by γ (3-index, frame+spinor) in
+    the spinor chain. γ_5.col(slot 1, lower) ↔ γ.row(slot 1, upper)."""
+    for i, fi in enumerate(factors):
+        if not (
+            isinstance(fi, Tensor)
+            and fi.name == gamma5_name
+            and len(fi.indices) == 2
+        ):
+            continue
+        g5_col = fi.indices[1]
+        if g5_col.position != "lower":
+            continue
+        for j, fj in enumerate(factors):
+            if i == j:
+                continue
+            if not (
+                isinstance(fj, Tensor)
+                and fj.name == gamma_name
+                and len(fj.indices) == 3
+            ):
+                continue
+            g_row = fj.indices[1]
+            if g_row.position != "upper":
+                continue
+            if g_row.name == g5_col.name and g_row.space == g5_col.space:
+                return (i, j)
+    return None
+
+
+def apply_gamma5_gamma_anticommute(
+    expr: TensorExpr,
+    gamma5_name: str = "gamma_5",
+    gamma_name: str = "gamma",
+) -> TensorExpr:
+    """{γ_5, γ^μ} = 0 → push γ_5 to the right of every γ.
+
+    .. math::
+        \\gamma_5^\\alpha{}_\\beta\\, \\gamma^{\\mu,\\beta}{}_\\delta
+        \\;\\to\\;
+        -\\,\\gamma^{\\mu,\\alpha}{}_\\rho\\, \\gamma_5^\\rho{}_\\delta
+
+    Outer spinor indices (α, δ) are preserved so the chain reconnects to ψ̄, ψ
+    unchanged; a fresh dummy ρ replaces the original contraction.
+
+    한 번에 한 쌍만 처리 — fixed-point loop 에서 반복.
+    """
+    if isinstance(expr, TensorSum):
+        new_l = apply_gamma5_gamma_anticommute(expr.left, gamma5_name, gamma_name)
+        new_r = apply_gamma5_gamma_anticommute(expr.right, gamma5_name, gamma_name)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+    if isinstance(expr, ScalarMul):
+        new_inner = apply_gamma5_gamma_anticommute(expr.expr, gamma5_name, gamma_name)
+        if new_inner is not expr.expr:
+            return ScalarMul(expr.scalar, new_inner)
+        return expr
+    if not isinstance(expr, TensorProduct):
+        return expr
+
+    factors = collect_factors(expr)
+    pair = _find_gamma5_gamma_pair(factors, gamma5_name, gamma_name)
+    if pair is None:
+        new_l = apply_gamma5_gamma_anticommute(expr.left, gamma5_name, gamma_name)
+        new_r = apply_gamma5_gamma_anticommute(expr.right, gamma5_name, gamma_name)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorProduct(new_l, new_r)
+        return expr
+
+    i_g5, j_g = pair
+    g5 = factors[i_g5]
+    g = factors[j_g]
+    spinor_space = g5.indices[0].space
+    g5_row_name = g5.indices[0].name   # α  (outer left, → ψ̄)
+    g_col_name = g.indices[2].name     # δ  (outer right, → ψ)
+    new_dummy = _fresh_swap_dummy()
+
+    new_g = Tensor(
+        g.name,
+        [
+            g.indices[0],                                    # μ↑frame
+            Index(g5_row_name, spinor_space, "upper"),       # α (was γ_5.row)
+            Index(new_dummy, spinor_space, "lower"),         # ρ (new dummy)
+        ],
+        antisymmetric_pairs=list(g.antisymmetric_pairs),
+        reps=dict(g.reps),
+        statistics=g.statistics,
+    )
+    new_g5 = Tensor(
+        g5.name,
+        [
+            Index(new_dummy, spinor_space, "upper"),         # ρ
+            Index(g_col_name, spinor_space, "lower"),        # δ (was γ.col)
+        ],
+        antisymmetric_pairs=list(g5.antisymmetric_pairs),
+        reps=dict(g5.reps),
+        statistics=g5.statistics,
+    )
+
+    new_factors = list(factors)
+    new_factors[i_g5] = new_g
+    new_factors[j_g] = new_g5
+    return ScalarMul(-1, _product_of_factors(new_factors))
+
+
 def _flatten_sum(expr: TensorExpr) -> list[TensorExpr]:
     """``TensorSum`` 트리를 평탄한 summand 리스트로 변환."""
     if isinstance(expr, TensorSum):
@@ -1262,6 +1491,8 @@ def simplify(expr: TensorExpr, mreg=None) -> TensorExpr:
         cur = pull_scalars(cur)
         cur = commute_partial_through_constants(cur)
         cur = apply_clifford_sigma_gamma(cur)
+        cur = apply_gamma5_gamma_anticommute(cur)
+        cur = apply_chiral_projector_identities(cur)
         cur = apply_epsilon_su_n_invariance(cur)
         cur = collect_scalar_terms(cur)
         cur = _simplify_zeros(cur)
