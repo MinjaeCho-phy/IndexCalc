@@ -43,6 +43,15 @@ from indexcalc.lions.serializer import (
     expr_to_dict,
     expr_from_dict,
 )
+from indexcalc.lions.augment import (
+    RepMutation,
+    mutate_field_reps,
+    apply_rep_mutation,
+    enumerate_wrong_rep_negatives,
+    permute_dummy_indices,
+    swap_top_product,
+    scale_by,
+)
 
 __all__ = [
     "FieldSpec",
@@ -67,4 +76,11 @@ __all__ = [
     "sample_from_dict",
     "expr_to_dict",
     "expr_from_dict",
+    "RepMutation",
+    "mutate_field_reps",
+    "apply_rep_mutation",
+    "enumerate_wrong_rep_negatives",
+    "permute_dummy_indices",
+    "swap_top_product",
+    "scale_by",
 ]
