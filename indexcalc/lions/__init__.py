@@ -60,6 +60,14 @@ from indexcalc.lions.tokenizer import (
     build_vocab,
     STRUCTURE_TOKENS,
 )
+from indexcalc.lions.graph import (
+    GraphNode,
+    GraphEdge,
+    EncodedGraph,
+    graph_encode,
+    encode_sample,
+    encode_dataset,
+)
 
 __all__ = [
     "FieldSpec",
@@ -97,4 +105,10 @@ __all__ = [
     "tokens_to_expr",
     "build_vocab",
     "STRUCTURE_TOKENS",
+    "GraphNode",
+    "GraphEdge",
+    "EncodedGraph",
+    "graph_encode",
+    "encode_sample",
+    "encode_dataset",
 ]
