@@ -54,6 +54,12 @@ from indexcalc.lions.augment import (
     augment_sample,
     expand_dataset,
 )
+from indexcalc.lions.tokenizer import (
+    expr_to_tokens,
+    tokens_to_expr,
+    build_vocab,
+    STRUCTURE_TOKENS,
+)
 
 __all__ = [
     "FieldSpec",
@@ -87,4 +93,8 @@ __all__ = [
     "scale_by",
     "augment_sample",
     "expand_dataset",
+    "expr_to_tokens",
+    "tokens_to_expr",
+    "build_vocab",
+    "STRUCTURE_TOKENS",
 ]
