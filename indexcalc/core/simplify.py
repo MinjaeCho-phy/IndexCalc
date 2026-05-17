@@ -1730,6 +1730,134 @@ def absorb_einstein_metric(expr: TensorExpr, mreg=None) -> TensorExpr:
     return expr
 
 
+# ─── M9.7: sign-aware antisym normalization ────────────────
+
+
+def _normalize_tensor_antisym_signs(T: Tensor) -> tuple[int, Tensor]:
+    """Antisym pair의 두 슬롯 인덱스 이름을 정렬하고 부호를 추출.
+
+    Multi-pair (예: f^{abc} all-pair antisym (0,1)(0,2)(1,2))는 fixed-point
+    iteration으로 모든 pair가 정렬 상태에 들어갈 때까지 swap을 반복하고
+    부호 parity를 누적한다. 슬롯 인덱스 메타 (antisymmetric_pairs 위치,
+    symmetric_pairs, traceless, transverse, reps, statistics) 는 모두
+    보존 — swap은 인덱스 *content* 만 교환.
+    """
+    if not T.antisymmetric_pairs:
+        return 1, T
+
+    new_indices = list(T.indices)
+    sign = 1
+    changed = True
+    # Bound on iterations: at worst n*(n-1)/2 swaps for n slots.
+    max_iter = len(new_indices) * (len(new_indices) - 1) + 1
+    for _ in range(max_iter):
+        if not changed:
+            break
+        changed = False
+        for (s_a, s_b) in T.antisymmetric_pairs:
+            n_a = new_indices[s_a].name
+            n_b = new_indices[s_b].name
+            if n_a > n_b:
+                new_indices[s_a], new_indices[s_b] = (
+                    new_indices[s_b], new_indices[s_a],
+                )
+                sign = -sign
+                changed = True
+
+    if sign == 1 and all(
+        new_indices[i] is T.indices[i] for i in range(len(new_indices))
+    ):
+        return 1, T  # no change
+
+    new_T = Tensor(
+        T.name, new_indices,
+        antisymmetric_pairs=list(T.antisymmetric_pairs),
+        symmetric_pairs=list(T.symmetric_pairs),
+        traceless=list(T.traceless),
+        transverse=list(T.transverse),
+        reps=dict(T.reps),
+        statistics=T.statistics,
+    )
+    return sign, new_T
+
+
+def normalize_antisym_signs(expr: TensorExpr) -> TensorExpr:
+    """Antisym slot의 인덱스 이름을 정렬하고 swap parity로 부호를 끌어냄.
+
+    F^A_{νμ} → -F^A_{μν} (lexicographically μ < ν) 와 같은 normalization.
+    이후 ``collect_scalar_terms`` 가 같은 canonical body로 group 묶고
+    부호를 합산 → 4-항 antisym cancellation (F·F Lorentz 같은 케이스)
+    이 잡힘.
+
+    재귀적으로 모든 child에 적용하고 부호를 합쳐 한 번의 outer ScalarMul
+    로 wrap (`pull_scalars` 가 다음 pass에서 평탄화).
+    """
+    if isinstance(expr, ZeroTensor):
+        return expr
+    if isinstance(expr, Tensor):
+        sign, new_T = _normalize_tensor_antisym_signs(expr)
+        if sign == 1:
+            return new_T
+        return ScalarMul(-1, new_T)
+    if isinstance(expr, ScalarMul):
+        inner = normalize_antisym_signs(expr.expr)
+        if isinstance(inner, ScalarMul):
+            return ScalarMul(expr.scalar * inner.scalar, inner.expr)
+        return ScalarMul(expr.scalar, inner)
+    if isinstance(expr, TensorProduct):
+        L = normalize_antisym_signs(expr.left)
+        R = normalize_antisym_signs(expr.right)
+        sl, lb = _split_scalar(L)
+        sr, rb = _split_scalar(R)
+        product = TensorProduct(lb, rb)
+        total = sl * sr
+        if total == 1:
+            return product
+        return ScalarMul(total, product)
+    if isinstance(expr, TensorSum):
+        new_l = normalize_antisym_signs(expr.left)
+        new_r = normalize_antisym_signs(expr.right)
+        if new_l is expr.left and new_r is expr.right:
+            return expr
+        return TensorSum(new_l, new_r)
+    if isinstance(expr, PartialDeriv):
+        inner = normalize_antisym_signs(expr.expr)
+        si, ib = _split_scalar(inner)
+        new_deriv = PartialDeriv(ib, expr.deriv_index)
+        if si == 1:
+            return new_deriv
+        return ScalarMul(si, new_deriv)
+    if isinstance(expr, CovariantDeriv):
+        inner = normalize_antisym_signs(expr.expr)
+        si, ib = _split_scalar(inner)
+        new_deriv = CovariantDeriv(ib, expr.deriv_index, expr.connections)
+        if si == 1:
+            return new_deriv
+        return ScalarMul(si, new_deriv)
+    return expr
+
+
+def canonical_form_with_sign(expr: TensorExpr) -> tuple[int, tuple]:
+    """Return ``(sign, canonical_form_modulo_dummies(normalized))``.
+
+    Applies ``normalize_antisym_signs`` first so two expressions that
+    differ only by antisym slot index swaps map to the same canonical
+    key with opposite signs. Used for **enumerator dedupe** (collapse
+    sign-equivalent duplicates of the same scalar invariant).
+
+    Not used by ``simplify`` itself — sign-normalization changes form in
+    ways that break the existing position-collapsed cancellation paths
+    (e.g. M7-C four-term Lorentz fold of W^A_{μν} W_A^{μν}).
+    """
+    normalized = normalize_antisym_signs(expr)
+    sign = 1
+    body = normalized
+    if isinstance(normalized, ScalarMul) and normalized.scalar in (1, -1):
+        sign = int(normalized.scalar)
+        body = normalized.expr
+    return sign, canonical_form_modulo_dummies(body)
+
+
 # ─── simplify (top-level) ───────────────────────────────────
 
 

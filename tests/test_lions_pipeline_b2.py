@@ -6,13 +6,12 @@ FieldSpec(F^A_{μν}, antisym(μν)). Verify:
 - W·W ( = W^A_μ W^B_ν η_{AB} η^{μν} ) is enumerated.
 - F·F ( = F^A_{μν} F^B_{ρσ} η_{AB} η^{μρ} η^{νσ} ) is enumerated.
 
-M9.6 landed: ``absorb_einstein_metric`` simplifier rule normalizes
-η_{AB} W^A W^B forms by raise/lower, so the antisym × symmetric = 0
-pattern is now recognised. W·W and the canonical F·F enumerator form
-are SU(2)+Lorentz invariant. A separate enumerator dedupe issue means
-F·F appears as two samples (cross-contraction sign-equivalent forms)
-and one of them still labels SU(2)=False — that's a sign-aware
-``canonical_form_modulo_dummies`` gap (M9.7 candidate).
+M9.6 landed: ``absorb_einstein_metric`` normalizes η_{AB} W^A W^B
+into raise/lower form so the antisym × symmetric = 0 pattern fires.
+M9.7 landed: enumerator dedupes sign-equivalent F·F forms via
+``canonical_form_with_sign`` so labelling runs once on the canonically
+sign-normalized body. Result: B2 produces exactly two samples
+(W·W and F·F), both SU(2)+Lorentz invariant.
 
 - F = ∂W + WW synthesis is deferred to D7+ (notes/d6_gauge_field.md §1).
 - W^A_μ alone (free indices) is never produced — perfect-matching closes
@@ -61,15 +60,8 @@ def test_b2_enumerator_yields_gauge_invariants(b2):
 
 
 def test_b2_labeler_recovers_gauge_invariants(b2, generators):
-    """W·W and the canonical F·F enumerator form are recovered as
-    SU(2)+Lorentz invariant after M9.6 metric absorption.
-
-    F·F appears in two enumerator forms (μ-ρ-ν-σ vs μ-σ-ν-ρ contraction
-    orders). The second is sign-equivalent via F's antisym(μν), but
-    enumerator dedupe doesn't realise that yet (M9.7 candidate). It's
-    fine for at least one F·F form to be fully invariant — that's
-    enough for downstream labelling to pick up the (+1) instance.
-    """
+    """Post-M9.6+M9.7: B2 has exactly two samples (W·W, F·F) and every
+    one is SU(2)+Lorentz invariant. No false negatives in the dataset."""
     caps = EnumeratorCaps(
         max_field_total=2, max_per_field=2,
         max_partials_total=0, max_partials_per_field=0,
@@ -79,18 +71,17 @@ def test_b2_labeler_recovers_gauge_invariants(b2, generators):
     )
     labeled = label_samples(samples, generators)
 
-    ww_invariant_count = 0
-    ff_invariant_count = 0
-    for samp in labeled:
-        all_invariant = samp.labels["SU(2)"] and samp.labels["Lorentz"]
-        if samp.field_counts == {"W": 2, "F": 0} and all_invariant:
-            ww_invariant_count += 1
-        if samp.field_counts == {"W": 0, "F": 2} and all_invariant:
-            ff_invariant_count += 1
+    field_counts = [s.field_counts for s in labeled]
+    assert {"W": 2, "F": 0} in field_counts, "W·W missing"
+    assert {"W": 0, "F": 2} in field_counts, "F·F missing"
+    # M9.7 dedupes sign-equivalent F·F variants → exactly one F·F sample.
+    ff_count = sum(1 for fc in field_counts if fc == {"W": 0, "F": 2})
+    assert ff_count == 1, f"expected 1 F·F after M9.7 dedupe, got {ff_count}"
 
-    assert ww_invariant_count >= 1, (
-        "W·W not labelled SU(2)+Lorentz invariant"
-    )
-    assert ff_invariant_count >= 1, (
-        "no F·F form labelled SU(2)+Lorentz invariant"
-    )
+    for samp in labeled:
+        assert samp.labels["SU(2)"], (
+            f"{samp.field_counts}: SU(2) False — false-negative regression"
+        )
+        assert samp.labels["Lorentz"], (
+            f"{samp.field_counts}: Lorentz False — false-negative regression"
+        )

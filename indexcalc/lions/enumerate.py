@@ -27,7 +27,10 @@ from indexcalc.core.variation import ZeroTensor
 from indexcalc.core.simplify import (
     simplify,
     canonical_form_modulo_dummies,
+    canonical_form_with_sign,
+    normalize_antisym_signs,
 )
+from indexcalc.core.tensor import ScalarMul
 from indexcalc.lions.fields import FieldSpec, FieldRegistry, InvariantTensorSpec
 from indexcalc.lions.builders import (
     make_eta,
@@ -428,15 +431,26 @@ def enumerate_scalar_invariants(
                         simpl = simplify(expr)
                         if isinstance(simpl, ZeroTensor):
                             continue
-                        key = canonical_form_modulo_dummies(simpl)
+                        # M9.7: sign-aware dedupe — two enumerations
+                        # differing only by antisym slot swaps are the
+                        # same scalar (up to ±1). Collapse to the
+                        # canonically sign-normalized form so labelling
+                        # runs once on a form the simplifier can fold.
+                        sign, key = canonical_form_with_sign(simpl)
                         if key in seen:
                             continue
+                        normalized = normalize_antisym_signs(simpl)
+                        if (isinstance(normalized, ScalarMul)
+                                and normalized.scalar == -1):
+                            stored = normalized.expr
+                        else:
+                            stored = normalized
                         # Mass dim metadata (downstream use)
                         mdim = sum(
                             counts[s.name] * s.mass_dim for s in fields
                         ) + sum(total_partials.values())
                         seen[key] = EnumeratedSample(
-                            expr=simpl,
+                            expr=stored,
                             mass_dim=float(mdim),
                             field_counts=dict(counts),
                             partial_count=sum(total_partials.values()),
