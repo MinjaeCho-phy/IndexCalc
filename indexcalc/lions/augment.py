@@ -208,3 +208,43 @@ def scale_by(sample: LabeledSample, c) -> LabeledSample:
         invariant_counts=dict(sample.invariant_counts),
         provenance="augmented",
     )
+
+
+# ─── Orchestrator: expand_dataset ──────────────────────
+
+
+_DEFAULT_SCALES = (-1.0, 0.5, 2.0)
+
+
+def augment_sample(
+    sample: LabeledSample,
+    *,
+    include_swap: bool = True,
+    scales: tuple = _DEFAULT_SCALES,
+) -> list[LabeledSample]:
+    """Generate label-preserving variants of one sample.
+
+    Returns the original first, then (optional) a top-product swap,
+    then a ScalarMul wrap for each scalar in ``scales``. All variants
+    share the same label dict as the input by construction.
+    """
+    out: list[LabeledSample] = [sample]
+    if include_swap and isinstance(sample.expr, TensorProduct):
+        out.append(swap_top_product(sample))
+    for c in scales:
+        if c == 0:
+            continue
+        out.append(scale_by(sample, c))
+    return out
+
+
+def expand_dataset(
+    samples: list[LabeledSample],
+    *,
+    include_swap: bool = True,
+    scales: tuple = _DEFAULT_SCALES,
+) -> list[LabeledSample]:
+    """Expand each sample via ``augment_sample``; concatenate."""
+    return [v for s in samples for v in augment_sample(
+        s, include_swap=include_swap, scales=scales,
+    )]

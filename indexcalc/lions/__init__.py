@@ -51,6 +51,8 @@ from indexcalc.lions.augment import (
     permute_dummy_indices,
     swap_top_product,
     scale_by,
+    augment_sample,
+    expand_dataset,
 )
 
 __all__ = [
@@ -83,4 +85,6 @@ __all__ = [
     "permute_dummy_indices",
     "swap_top_product",
     "scale_by",
+    "augment_sample",
+    "expand_dataset",
 ]

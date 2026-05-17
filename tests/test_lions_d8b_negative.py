@@ -30,6 +30,8 @@ from indexcalc.lions import (
     permute_dummy_indices,
     swap_top_product,
     scale_by,
+    augment_sample,
+    expand_dataset,
     save_dataset,
     load_dataset,
 )
@@ -202,6 +204,34 @@ def test_scale_by_zero_rejects():
     _b0, labeled, _ = _b0_labeled()
     with pytest.raises(ValueError, match="ZeroTensor"):
         scale_by(labeled[0], 0)
+
+
+# ─── D8c orchestrator ──────────────────────────────────
+
+
+def test_augment_sample_preserves_labels_across_variants():
+    """``augment_sample`` returns the original + swap (if applicable) +
+    scale variants. Every variant must carry the same label dict.
+    """
+    _b0, labeled, _ = _b0_labeled()
+    # Pick a TensorProduct-rooted sample so swap_top_product fires.
+    s = next((x for x in labeled if isinstance(x.expr, TensorProduct)), None)
+    if s is None:
+        pytest.skip("no TensorProduct sample to augment")
+    variants = augment_sample(s, scales=(-1.0, 0.5))
+    assert len(variants) >= 3   # original + swap + 2 scales
+    assert variants[0] is s
+    for v in variants[1:]:
+        assert v.labels == s.labels
+        assert v.provenance == "augmented"
+
+
+def test_expand_dataset_scales_count():
+    """expand_dataset on N samples returns ≥N variants (≥3× when most
+    samples are TensorProducts and scales=(-1,0.5,2))."""
+    _b0, labeled, _ = _b0_labeled()
+    expanded = expand_dataset(labeled, scales=(-1.0, 0.5))
+    assert len(expanded) >= len(labeled) * 2
 
 
 # ─── Persistence round-trip on negatives ────────────────
