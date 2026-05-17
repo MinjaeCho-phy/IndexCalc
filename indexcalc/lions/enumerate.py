@@ -17,7 +17,7 @@ Algorithm (see notes/d2_enumerator_algorithm.md):
 
 from __future__ import annotations
 from dataclasses import dataclass, field as dc_field
-from typing import Iterator
+from typing import Iterator, Optional
 import itertools
 
 from indexcalc.core.index import IndexSpace, Index
@@ -28,7 +28,7 @@ from indexcalc.core.simplify import (
     simplify,
     canonical_form_modulo_dummies,
 )
-from indexcalc.lions.fields import FieldSpec, FieldRegistry
+from indexcalc.lions.fields import FieldSpec, FieldRegistry, InvariantTensorSpec
 from indexcalc.lions.builders import (
     make_eta,
     make_epsilon_su2,
@@ -43,6 +43,8 @@ class EnumeratorCaps:
     max_partials_total: int = 4
     max_partials_per_field: int = 2
     max_contractions_per_pattern: int = 1000
+    max_invariants_per_kind: int = 1
+    max_invariants_total: int = 2
 
 
 @dataclass
@@ -51,6 +53,7 @@ class EnumeratedSample:
     mass_dim: float
     field_counts: dict[str, int]
     partial_count: int
+    invariant_counts: dict[str, int] = dc_field(default_factory=dict)
 
 
 # ─── Helpers ──────────────────────────────────────────────
@@ -197,7 +200,9 @@ def _matching_to_factors_and_renames(
     matching: list[tuple[Index, Index]],
     space: IndexSpace,
     namer: _DummyNamer,
-) -> tuple[list[Tensor], dict[str, str]]:
+    *,
+    forbid_like_position: bool = False,
+) -> Optional[tuple[list[Tensor], dict[str, str]]]:
     """Convert a matching on indices of one space to:
        - extra invariant-tensor factors (ε, η) for like-position pairs.
        - a rename map for direct (upper, lower) Einstein contractions.
@@ -205,6 +210,10 @@ def _matching_to_factors_and_renames(
     Naming convention: if both indices are upper, insert ε^{ij}; if both
     lower, insert ε_{ij} (SU(2)) or η_{μν} (spacetime). For (upper, lower)
     we rename one to the other (Einstein contraction).
+
+    If ``forbid_like_position`` is True and the matching contains any
+    like-position pair, return ``None`` (caller must skip this matching) —
+    used for spinor spaces where no like-position invariant exists.
     """
     extra: list[Tensor] = []
     renames: dict[str, str] = {}
@@ -219,6 +228,9 @@ def _matching_to_factors_and_renames(
             # Rename lo.name → up.name (so the lower one carries upper's dummy)
             renames[lo.name] = up.name
             continue
+
+        if forbid_like_position:
+            return None
 
         # Like-position pair: the invariant tensor must carry the OPPOSITE
         # position so Einstein convention contracts it against both hosts.
@@ -275,23 +287,56 @@ def _product(factors: list[TensorExpr]) -> TensorExpr:
 # ─── Main enumerator ──────────────────────────────────────
 
 
+def _invariant_count_choices(
+    alphabet: list[InvariantTensorSpec], caps: EnumeratorCaps,
+) -> Iterator[dict[str, int]]:
+    """Yield count-vectors over the invariant alphabet (including all-zero)."""
+    if not alphabet:
+        yield {}
+        return
+    names = [i.name for i in alphabet]
+    ranges = [range(0, caps.max_invariants_per_kind + 1) for _ in names]
+    for combo in itertools.product(*ranges):
+        if sum(combo) > caps.max_invariants_total:
+            continue
+        yield dict(zip(names, combo))
+
+
 def enumerate_scalar_invariants(
     registry: FieldRegistry,
     *,
     spacetime: IndexSpace,
     caps: EnumeratorCaps = EnumeratorCaps(),
+    forbid_like_position_spaces: Optional[set[IndexSpace]] = None,
+    invariant_alphabet: Optional[list[InvariantTensorSpec]] = None,
 ) -> list[EnumeratedSample]:
     """Enumerate gauge-invariant scalar monomials over the registered
     fields, deduplicated by canonical form and stripped of zeros.
 
-    Currently scoped for B0: scalar fields only, no fermion/vector. The
-    matching loop walks every IndexSpace; un-paired open indices fail the
-    perfect-matching check and that contraction is dropped.
+    Parameters
+    ----------
+    forbid_like_position_spaces : set[IndexSpace], optional
+        Spaces where like-position (upper-upper, lower-lower) matchings
+        must be skipped — e.g. spinor space where no Lorentz-singlet
+        ε_{αβ} is in the invariant alphabet.
+
+    The matching loop walks every IndexSpace; un-paired open indices fail
+    the perfect-matching check and that contraction is dropped.
+    Multisets with an odd total fermionic-field count are skipped
+    (Grassmann zero — no valid spinor contraction).
     """
     fields = registry.fields()
+    alphabet = list(invariant_alphabet or [])
+    forbid = forbid_like_position_spaces or set()
     seen: dict[tuple, EnumeratedSample] = {}
 
     for counts, total_partials in _multiset_choices(fields, caps):
+        # Fermi parity filter — sum of fermionic field counts must be even.
+        n_fermion = sum(
+            counts[s.name] for s in fields if s.statistics == "fermionic"
+        )
+        if n_fermion % 2 != 0:
+            continue
         # For each field, enumerate distributions of partials across instances.
         per_instance_distros = {
             spec.name: list(_distribute_partials(
@@ -305,80 +350,97 @@ def enumerate_scalar_invariants(
         if any(len(d) == 0 for d in per_instance_distros.values()):
             continue
 
-        # Cartesian product of per-field distributions
         for distros in itertools.product(*per_instance_distros.values()):
-            partials_per_instance = {
-                spec.name: list(distros[i])
-                for i, spec in enumerate(fields)
-            }
-            namer = _DummyNamer()
-            factors, open_idxs = _build_factors(
-                fields, counts, partials_per_instance, namer, spacetime,
-            )
-            by_space = _group_open_by_space(open_idxs)
+            for inv_counts in _invariant_count_choices(alphabet, caps):
+                partials_per_instance = {
+                    spec.name: list(distros[i])
+                    for i, spec in enumerate(fields)
+                }
+                namer = _DummyNamer()
+                factors, open_idxs = _build_factors(
+                    fields, counts, partials_per_instance, namer, spacetime,
+                )
+                # Append invariant-tensor instances as extra factors with
+                # their own open slots. Each is rep-singlet, so their
+                # indices join the matching pool without producing a
+                # Leibniz term under generator action.
+                for inv_spec in alphabet:
+                    for _ in range(inv_counts.get(inv_spec.name, 0)):
+                        inv_tensor = inv_spec.build(namer)
+                        open_idxs.extend(
+                            (idx, len(factors)) for idx in inv_tensor.indices
+                        )
+                        factors.append(inv_tensor)
+                by_space = _group_open_by_space(open_idxs)
 
-            # Generate per-space matchings; Cartesian product across spaces
-            per_space_matchings = []
-            ok = True
-            for space, idxs in by_space.items():
-                if len(idxs) % 2 != 0:
-                    ok = False
-                    break
-                matchings = list(_perfect_matchings(idxs))
-                per_space_matchings.append((space, matchings))
-            if not ok:
-                continue
+                # Generate per-space matchings; Cartesian product across spaces
+                per_space_matchings = []
+                ok = True
+                for space, idxs in by_space.items():
+                    if len(idxs) % 2 != 0:
+                        ok = False
+                        break
+                    matchings = list(_perfect_matchings(idxs))
+                    per_space_matchings.append((space, matchings))
+                if not ok:
+                    continue
 
-            # Bail if combinatorial explosion
-            n_matches = 1
-            for _, ms in per_space_matchings:
-                n_matches *= max(1, len(ms))
-            if n_matches > caps.max_contractions_per_pattern:
-                continue
+                # Bail if combinatorial explosion
+                n_matches = 1
+                for _, ms in per_space_matchings:
+                    n_matches *= max(1, len(ms))
+                if n_matches > caps.max_contractions_per_pattern:
+                    continue
 
-            for matching_choice in itertools.product(
-                *[ms for _, ms in per_space_matchings]
-            ):
-                all_extras: list[Tensor] = []
-                all_renames: dict[str, str] = {}
-                for (space, _), matching in zip(
-                    per_space_matchings, matching_choice
+                for matching_choice in itertools.product(
+                    *[ms for _, ms in per_space_matchings]
                 ):
-                    extras, renames = _matching_to_factors_and_renames(
-                        matching, space, namer,
-                    )
-                    all_extras.extend(extras)
-                    # Merge renames — collisions imply two indices being
-                    # forced into different targets, which means this
-                    # matching is ill-formed; skip.
-                    collide = False
-                    for k, v in renames.items():
-                        if k in all_renames and all_renames[k] != v:
+                    all_extras: list[Tensor] = []
+                    all_renames: dict[str, str] = {}
+                    for (space, _), matching in zip(
+                        per_space_matchings, matching_choice
+                    ):
+                        result = _matching_to_factors_and_renames(
+                            matching, space, namer,
+                            forbid_like_position=(space in forbid),
+                        )
+                        if result is None:
                             collide = True
                             break
-                        all_renames[k] = v
-                    if collide:
-                        break
-                else:
-                    full_factors = factors + all_extras
-                    expr = _product(full_factors)
-                    expr = _apply_renames(expr, all_renames)
-                    # Drop zeros via simplifier
-                    simpl = simplify(expr)
-                    if isinstance(simpl, ZeroTensor):
-                        continue
-                    key = canonical_form_modulo_dummies(simpl)
-                    if key in seen:
-                        continue
-                    # Mass dim metadata (downstream use)
-                    mdim = sum(
-                        counts[s.name] * s.mass_dim for s in fields
-                    ) + sum(total_partials.values())
-                    seen[key] = EnumeratedSample(
-                        expr=simpl,
-                        mass_dim=float(mdim),
-                        field_counts=dict(counts),
-                        partial_count=sum(total_partials.values()),
-                    )
+                        extras, renames = result
+                        all_extras.extend(extras)
+                        # Merge renames — collisions imply two indices being
+                        # forced into different targets, which means this
+                        # matching is ill-formed; skip.
+                        collide = False
+                        for k, v in renames.items():
+                            if k in all_renames and all_renames[k] != v:
+                                collide = True
+                                break
+                            all_renames[k] = v
+                        if collide:
+                            break
+                    else:
+                        full_factors = factors + all_extras
+                        expr = _product(full_factors)
+                        expr = _apply_renames(expr, all_renames)
+                        # Drop zeros via simplifier
+                        simpl = simplify(expr)
+                        if isinstance(simpl, ZeroTensor):
+                            continue
+                        key = canonical_form_modulo_dummies(simpl)
+                        if key in seen:
+                            continue
+                        # Mass dim metadata (downstream use)
+                        mdim = sum(
+                            counts[s.name] * s.mass_dim for s in fields
+                        ) + sum(total_partials.values())
+                        seen[key] = EnumeratedSample(
+                            expr=simpl,
+                            mass_dim=float(mdim),
+                            field_counts=dict(counts),
+                            partial_count=sum(total_partials.values()),
+                            invariant_counts=dict(inv_counts),
+                        )
 
     return list(seen.values())

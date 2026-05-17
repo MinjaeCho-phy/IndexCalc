@@ -64,3 +64,19 @@ def make_epsilon_su2_upper(
 def make_partial(field: Tensor, spacetime: IndexSpace, mu: str = "μ") -> PartialDeriv:
     """∂_μ on the given field, picking lower spacetime index name μ."""
     return partial(field, spacetime.lower(mu))
+
+
+def make_gamma(
+    spacetime: IndexSpace, dirac: IndexSpace,
+    mu: str = "μ", row: str = "α", col: str = "β",
+) -> Tensor:
+    """γ^{μ,α}{}_β — Dirac gamma matrix as an invariant (rep-singlet) tensor.
+
+    Same slot convention as ``tests/test_m65_acceptance.make_gamma`` so the
+    M6.5 Clifford simplifier composes with it.
+    """
+    return Tensor(
+        "gamma",
+        [spacetime.upper(mu), dirac.upper(row), dirac.lower(col)],
+        reps={},
+    )

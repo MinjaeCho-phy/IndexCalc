@@ -65,6 +65,35 @@ class FieldSpec:
         )
 
 
+@dataclass(frozen=True)
+class InvariantTensorSpec:
+    """Catalog entry for an invariant (rep-singlet) tensor like γ^μ, P_L.
+
+    Distinct from ``FieldSpec`` in that the enumerator may include 0+
+    instances per monomial (capped via ``EnumeratorCaps``) and the
+    resulting tensor carries ``reps={}`` — generator action is trivial,
+    so no Leibniz term from this factor.
+
+    Examples: γ^μ (slots = st upper + dirac upper + dirac lower),
+    P_L/P_R (dirac upper + dirac lower).
+    """
+    name: str
+    slots: tuple[SlotSpec, ...]
+    reps: dict[str, str] = field(default_factory=dict)
+    symmetric_pairs: tuple = ()
+    antisymmetric_pairs: tuple = ()
+
+    def build(self, namer: Callable[[], str]) -> Tensor:
+        indices = [s.make_index(namer()) for s in self.slots]
+        return Tensor(
+            self.name,
+            indices,
+            reps=dict(self.reps),
+            symmetric_pairs=list(self.symmetric_pairs),
+            antisymmetric_pairs=list(self.antisymmetric_pairs),
+        )
+
+
 class FieldRegistry:
     """Ordered catalog of ``FieldSpec`` entries.
 

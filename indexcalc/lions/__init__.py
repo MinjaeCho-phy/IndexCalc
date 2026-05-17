@@ -14,13 +14,16 @@ LIONS adds the things the core deliberately does NOT have:
 Design note: ``notes/data_pipeline_design.md`` in the LIONS repo.
 """
 
-from indexcalc.lions.fields import FieldSpec, FieldRegistry, SlotSpec
+from indexcalc.lions.fields import (
+    FieldSpec, FieldRegistry, SlotSpec, InvariantTensorSpec,
+)
 from indexcalc.lions.builders import (
     make_eta,
     make_kronecker,
     make_epsilon_su2,
     make_epsilon_su2_upper,
     make_partial,
+    make_gamma,
 )
 from indexcalc.lions.enumerate import (
     EnumeratorCaps,
@@ -37,11 +40,13 @@ __all__ = [
     "FieldSpec",
     "FieldRegistry",
     "SlotSpec",
+    "InvariantTensorSpec",
     "make_eta",
     "make_kronecker",
     "make_epsilon_su2",
     "make_epsilon_su2_upper",
     "make_partial",
+    "make_gamma",
     "EnumeratorCaps",
     "EnumeratedSample",
     "enumerate_scalar_invariants",

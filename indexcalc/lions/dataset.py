@@ -27,6 +27,7 @@ class LabeledSample:
     mass_dim: float
     field_counts: dict[str, int]
     partial_count: int
+    invariant_counts: dict[str, int] = dc_field(default_factory=dict)
     provenance: str = "enumerated"
 
 
@@ -56,5 +57,6 @@ def label_samples(
             mass_dim=s.mass_dim,
             field_counts=dict(s.field_counts),
             partial_count=s.partial_count,
+            invariant_counts=dict(getattr(s, "invariant_counts", {}) or {}),
         ))
     return out
