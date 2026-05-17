@@ -1088,24 +1088,34 @@ def apply_epsilon_su_n_invariance(
     # else: already T.row ↔ ε.slot0
 
     # Step 2: Identify X (T.col contraction partner) and Y (ε.slot1 partner).
+    # M8.1: partners may be wrapped in PartialDeriv/CovariantDeriv (e.g. ∂L
+    # in a chiral kinetic term). _innermost_tensor unwraps; the partner's
+    # SU(N) fund index lives on the inner Tensor's slot list, and the inner
+    # Tensor's name is what we use for lex comparison.
     T_col_name = T.indices[2].name
     eps_s1_name = eps.indices[1].name
 
     X_idx = Y_idx = None
+    X_inner = Y_inner = None
     for k, f in enumerate(factors):
-        if k == i_T or k == j_eps or not isinstance(f, Tensor):
+        if k == i_T or k == j_eps:
             continue
-        for idx in f.indices:
+        inner = f if isinstance(f, Tensor) else _innermost_tensor(f)
+        if inner is None:
+            continue
+        for idx in inner.indices:
             if idx.space == fund_space:
                 if idx.name == T_col_name and idx.position == "upper":
                     X_idx = k
+                    X_inner = inner
                 if idx.name == eps_s1_name and idx.position == "upper":
                     Y_idx = k
+                    Y_inner = inner
 
     # 두 partner 가 모두 식별되고 서로 다를 때만 lex normalize 가능.
     if X_idx is not None and Y_idx is not None and X_idx != Y_idx:
-        X = factors[X_idx]
-        Y = factors[Y_idx]
+        X = X_inner if X_inner is not None else factors[X_idx]
+        Y = Y_inner if Y_inner is not None else factors[Y_idx]
         if X.name > Y.name:
             # Identity: swap T.col name <-> ε.slot1 name.
             new_T = Tensor(
