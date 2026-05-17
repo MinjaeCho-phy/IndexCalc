@@ -1575,6 +1575,161 @@ def collect_scalar_terms(expr: TensorExpr) -> TensorExpr:
     return result
 
 
+# ─── M9.6: metric absorption (Einstein raise/lower) ────────
+
+
+def _is_metric_factor_for_absorption(M: TensorExpr, mreg=None) -> bool:
+    """Einstein 흡수 가능 metric factor 식별.
+
+    조건: 두 인덱스가 (i) 같은 IndexSpace, (ii) 그 공간이 metric을 가짐,
+    (iii) **같은 position** (둘 다 upper 또는 둘 다 lower — η^{αβ} or η_{αβ}).
+    Mixed-position Kronecker δ^α_β는 흡수 대상 아님 (Einstein convention의
+    direct contraction은 simplify의 다른 path에서 이미 처리).
+
+    mreg가 주어지면 그것을 우선 사용; 없으면 heuristic (name == "eta"
+    + symmetric_pair (0,1) + reps == {})로 fallback.
+    """
+    if not isinstance(M, Tensor):
+        return False
+    if len(M.indices) != 2:
+        return False
+    if M.indices[0].position != M.indices[1].position:
+        return False
+    if M.indices[0].space != M.indices[1].space:
+        return False
+    if not M.indices[0].space.metric:
+        return False
+    if mreg is not None and mreg.is_metric(M):
+        return True
+    # Heuristic fallback (LIONS builders.make_eta convention)
+    if M.name != "eta":
+        return False
+    if M.reps:
+        return False
+    sym_set = {tuple(sorted(p)) for p in M.symmetric_pairs}
+    if (0, 1) not in sym_set:
+        return False
+    return True
+
+
+def _find_slot_with_name(F: TensorExpr, name: str) -> int | None:
+    """Tensor F의 인덱스 슬롯 중 이름이 ``name``인 것의 위치 반환.
+
+    PartialDeriv/CovariantDeriv wrapper의 deriv_index는 별도 path —
+    여기선 metric 흡수가 inner Tensor에 대해서만이라 None 반환 (deferred).
+    """
+    if isinstance(F, Tensor):
+        for s, idx in enumerate(F.indices):
+            if idx.name == name:
+                return s
+    return None
+
+
+def _rebuild_with_renamed_slot(
+    F: Tensor, slot: int, new_name: str, new_position: str,
+) -> Tensor:
+    """Tensor의 특정 슬롯 인덱스를 (new_name, new_position)로 교체한 새 Tensor."""
+    new_indices = list(F.indices)
+    old = new_indices[slot]
+    new_indices[slot] = Index(new_name, old.space, new_position)
+    return Tensor(
+        F.name, new_indices,
+        antisymmetric_pairs=list(F.antisymmetric_pairs),
+        symmetric_pairs=list(F.symmetric_pairs),
+        traceless=list(F.traceless),
+        transverse=list(F.transverse),
+        reps=dict(F.reps),
+        statistics=F.statistics,
+    )
+
+
+def absorb_einstein_metric(expr: TensorExpr, mreg=None) -> TensorExpr:
+    """metric η^{αβ} 또는 η_{αβ}를 흡수해 host 텐서 슬롯을 raise/lower.
+
+    Pattern:
+        η^{αβ} T_β … = T^α …      (β dummy contracted to T's lower slot)
+        η_{αβ} T^β … = T_α …      (β dummy contracted to T's upper slot)
+
+    Preconditions (한 번에 하나 적용; outer simplify fixed-point가 반복):
+      - 두 metric 인덱스 α, β 모두 dummy: count == 2 globally, free_indices
+        에 없음, distinct.
+      - α, β 각각이 다른 (metric 아닌) factor에서 발견 — **cross-factor**.
+        Self-trace η^{μν} T_{μν} = T^μ_μ는 host_0 == host_1 → skip (deferred).
+      - Host factor가 Tensor (PartialDeriv wrapper는 deferred).
+
+    Effect:
+      - metric 제거.
+      - host_α의 슬롯을 (name n_β, position = metric의 position)으로 교체.
+
+    이 흡수 후 strict canonical에서 W^A W_A 형식이 dummy 이름만 다른 등가
+    factor multiset으로 보여 ``is_zero_by_antisym_swap``이 antisym × sym
+    cancellation을 잡을 수 있다 (M9.6 핵심 use case).
+    """
+    if isinstance(expr, TensorSum):
+        new_l = absorb_einstein_metric(expr.left, mreg)
+        new_r = absorb_einstein_metric(expr.right, mreg)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+    if isinstance(expr, ScalarMul):
+        new_inner = absorb_einstein_metric(expr.expr, mreg)
+        if new_inner is not expr.expr:
+            return ScalarMul(expr.scalar, new_inner)
+        return expr
+    if not isinstance(expr, TensorProduct):
+        return expr
+
+    factors = collect_factors(expr)
+    name_counts = _index_name_count(factors)
+    free_names = {idx.name for idx in expr.free_indices}
+
+    for k, M in enumerate(factors):
+        if not _is_metric_factor_for_absorption(M, mreg):
+            continue
+        n_0 = M.indices[0].name
+        n_1 = M.indices[1].name
+        if n_0 == n_1:
+            continue
+        if n_0 in free_names or n_1 in free_names:
+            continue
+        if name_counts.get(n_0, 0) != 2 or name_counts.get(n_1, 0) != 2:
+            continue
+
+        host_0 = None
+        host_1 = None
+        for j, F in enumerate(factors):
+            if j == k:
+                continue
+            if host_0 is None:
+                s = _find_slot_with_name(F, n_0)
+                if s is not None:
+                    host_0 = (j, s)
+            if host_1 is None:
+                s = _find_slot_with_name(F, n_1)
+                if s is not None:
+                    host_1 = (j, s)
+        if host_0 is None or host_1 is None:
+            continue
+        if host_0[0] == host_1[0]:
+            continue  # self-trace (deferred)
+
+        j_a, slot_a = host_0
+        F_a = factors[j_a]
+        if not isinstance(F_a, Tensor):
+            continue
+        new_pos = M.indices[0].position
+        F_a_new = _rebuild_with_renamed_slot(F_a, slot_a, n_1, new_pos)
+
+        new_list: list[TensorExpr] = []
+        for i, f in enumerate(factors):
+            if i == k:
+                continue
+            new_list.append(F_a_new if i == j_a else f)
+        return _product_of_factors(new_list)
+
+    return expr
+
+
 # ─── simplify (top-level) ───────────────────────────────────
 
 
@@ -1607,6 +1762,7 @@ def simplify(expr: TensorExpr, mreg=None) -> TensorExpr:
         cur = _simplify_once(cur, mreg)
         cur = distribute_products(cur)
         cur = pull_scalars(cur)
+        cur = absorb_einstein_metric(cur, mreg)
         cur = commute_partial_through_constants(cur)
         cur = apply_clifford_sigma_gamma(cur)
         cur = apply_gamma5_gamma_anticommute(cur)
