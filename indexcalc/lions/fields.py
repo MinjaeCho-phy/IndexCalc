@@ -53,6 +53,7 @@ class FieldSpec:
     reps: dict[str, str] = field(default_factory=dict)
     mass_dim: float = 1.0
     statistics: str = "bosonic"
+    antisymmetric_pairs: tuple = ()
 
     def build(self, namer: Callable[[], str]) -> Tensor:
         """Instantiate a ``Tensor`` with fresh dummy index names from ``namer``."""
@@ -61,6 +62,7 @@ class FieldSpec:
             self.name,
             indices,
             reps=dict(self.reps),
+            antisymmetric_pairs=list(self.antisymmetric_pairs),
             statistics=self.statistics,
         )
 
