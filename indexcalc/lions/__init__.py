@@ -35,6 +35,14 @@ from indexcalc.lions.dataset import (
     label_expression,
     label_samples,
 )
+from indexcalc.lions.serializer import (
+    save_dataset,
+    load_dataset,
+    sample_to_dict,
+    sample_from_dict,
+    expr_to_dict,
+    expr_from_dict,
+)
 
 __all__ = [
     "FieldSpec",
@@ -53,4 +61,10 @@ __all__ = [
     "LabeledSample",
     "label_expression",
     "label_samples",
+    "save_dataset",
+    "load_dataset",
+    "sample_to_dict",
+    "sample_from_dict",
+    "expr_to_dict",
+    "expr_from_dict",
 ]
