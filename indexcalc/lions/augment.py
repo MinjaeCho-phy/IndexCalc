@@ -337,6 +337,144 @@ def add_n3_dangling_term(
     )
 
 
+# ─── I4: deeper multi-term hard negatives ──────────────
+
+
+def _combine_metadata(
+    expr: TensorExpr, sources: list[LabeledSample],
+    generators: dict[str, Generator], provenance: str,
+) -> LabeledSample:
+    """Re-label ``expr`` via the oracle, sum/max source metadata."""
+    new_labels = label_expression(expr, generators)
+    combined_counts: dict[str, int] = {}
+    total_partials = 0
+    max_mass_dim = 0.0
+    for s in sources:
+        for k, v in s.field_counts.items():
+            combined_counts[k] = combined_counts.get(k, 0) + v
+        total_partials += s.partial_count
+        max_mass_dim = max(max_mass_dim, s.mass_dim)
+    return LabeledSample(
+        expr=expr, labels=new_labels,
+        mass_dim=max_mass_dim,
+        field_counts=combined_counts,
+        partial_count=total_partials,
+        invariant_counts={},
+        provenance=provenance,
+    )
+
+
+def add_n3_positive_pair(
+    a: LabeledSample, b: LabeledSample,
+    generators: dict[str, Generator],
+) -> LabeledSample:
+    """``TensorSum(a, b)`` with disambiguated dummies. Both terms should
+    be invariant ⇒ the sum is invariant. Provenance ``n3_positive``."""
+    b_disambig = _disambiguate_indices(a.expr, b.expr)
+    expr = TensorSum(a.expr, b_disambig)
+    return _combine_metadata(expr, [a, b], generators, "n3_positive")
+
+
+def add_n3_double_broken_pair(
+    a: LabeledSample, b: LabeledSample,
+    generators: dict[str, Generator],
+) -> LabeledSample:
+    """``TensorSum(a, b)`` of two broken samples. Sum is broken under
+    every group that broke in either term (no magic cancellation).
+    Provenance ``n3_double_broken``."""
+    b_disambig = _disambiguate_indices(a.expr, b.expr)
+    expr = TensorSum(a.expr, b_disambig)
+    return _combine_metadata(expr, [a, b], generators, "n3_double_broken")
+
+
+def add_n4_nested(
+    a: LabeledSample, b: LabeledSample, c: LabeledSample,
+    generators: dict[str, Generator],
+) -> LabeledSample:
+    """``TensorSum(a, TensorSum(b, c))``. Dummies in b are disambiguated
+    against a; dummies in c are disambiguated against the (a, b)
+    combined expression. Provenance ``n4_nested``."""
+    b_disambig = _disambiguate_indices(a.expr, b.expr, q_suffix="_b")
+    ab = TensorSum(a.expr, b_disambig)
+    c_disambig = _disambiguate_indices(ab, c.expr, q_suffix="_c")
+    expr = TensorSum(a.expr, TensorSum(b_disambig, c_disambig))
+    return _combine_metadata(expr, [a, b, c], generators, "n4_nested")
+
+
+def enumerate_n3_positives(
+    positive_pool: list[LabeledSample],
+    generators: dict[str, Generator],
+    *, n_per_seed: int = 2, rng=None,
+) -> list[LabeledSample]:
+    """Pair each seed in ``positive_pool`` with ``n_per_seed`` other
+    distinct positives to build ``TensorSum(inv, inv)`` samples."""
+    import random as _random
+    if rng is None:
+        rng = _random.Random(0)
+    out: list[LabeledSample] = []
+    if len(positive_pool) < 2:
+        return out
+    for i, a in enumerate(positive_pool):
+        others = [p for j, p in enumerate(positive_pool) if j != i]
+        picks = rng.sample(others, k=min(n_per_seed, len(others)))
+        for b in picks:
+            try:
+                out.append(add_n3_positive_pair(a, b, generators))
+            except Exception:
+                continue
+    return out
+
+
+def enumerate_n3_double_broken(
+    broken_pool: list[LabeledSample],
+    generators: dict[str, Generator],
+    *, n_per_seed: int = 2, rng=None,
+) -> list[LabeledSample]:
+    """Pair broken samples to build ``TensorSum(broken, broken)``."""
+    import random as _random
+    if rng is None:
+        rng = _random.Random(0)
+    out: list[LabeledSample] = []
+    if len(broken_pool) < 2:
+        return out
+    for i, a in enumerate(broken_pool):
+        others = [p for j, p in enumerate(broken_pool) if j != i]
+        picks = rng.sample(others, k=min(n_per_seed, len(others)))
+        for b in picks:
+            try:
+                out.append(add_n3_double_broken_pair(a, b, generators))
+            except Exception:
+                continue
+    return out
+
+
+def enumerate_n4_nested(
+    positive_pool: list[LabeledSample],
+    broken_pool: list[LabeledSample],
+    generators: dict[str, Generator],
+    *, n_per_seed: int = 2, rng=None,
+) -> list[LabeledSample]:
+    """Build ``TensorSum(inv, TensorSum(inv, broken))`` — a 3-term sum
+    where exactly one term breaks. Sum is broken; I2's min readout has
+    to propagate the broken-term signal across two layers of TensorSum."""
+    import random as _random
+    if rng is None:
+        rng = _random.Random(0)
+    out: list[LabeledSample] = []
+    if not broken_pool or len(positive_pool) < 2:
+        return out
+    for i, a in enumerate(positive_pool):
+        others = [p for j, p in enumerate(positive_pool) if j != i]
+        b_picks = rng.sample(others, k=min(n_per_seed, len(others)))
+        for b in b_picks:
+            c = rng.choice(broken_pool)
+            try:
+                out.append(add_n4_nested(a, b, c, generators))
+            except Exception:
+                continue
+    return out
+
+
 def enumerate_n3_negatives(
     positive_pool: list[LabeledSample],
     broken_pool: list[LabeledSample],
