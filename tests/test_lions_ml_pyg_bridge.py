@@ -105,6 +105,35 @@ def test_batchable_with_pyg():
     assert batch.y.shape == (4, len(GROUP_ORDER))
 
 
+def test_charge_numeric_feature():
+    """I1: U(1)_Y rep tags map to numeric scalar (Data.x_float)."""
+    from indexcalc.lions.ml.features import node_charge_features
+
+    # Direct vocab check
+    assert node_charge_features({"U(1)_Y": "+1/2"}) == [0.5]
+    assert node_charge_features({"U(1)_Y": "-1/2"}) == [-0.5]
+    assert node_charge_features({"U(1)_Y": "+1"})   == [1.0]
+    assert node_charge_features({"U(1)_Y": "-1"})   == [-1.0]
+    assert node_charge_features({"U(1)_Y": "0"})    == [0.0]
+    assert node_charge_features({})                 == [0.0]  # <none>
+
+    # End-to-end through bridge: H (+1/2) · Hdag (-1/2) → [0.5, -0.5]
+    g = _h_norm_graph()
+    # H/Hdag are SU(2)-only in the test stub; redo with U(1)_Y reps.
+    su2 = IndexSpace("su2_fund", dim=2, indices="ij")
+    H = Tensor("H", [su2.upper("i")],
+               reps={"SU(2)": "fund", "U(1)_Y": "+1/2"})
+    Hd = Tensor("Hdag", [su2.lower("i")],
+                reps={"SU(2)": "fund", "U(1)_Y": "-1/2"})
+    g = graph_encode(TensorProduct(H, Hd))
+    g.labels = {"SU(2)": True, "U(1)_Y": True, "Lorentz": True}
+    d = encoded_to_pyg_data(g)
+    # x_float shape [2, 1] with [+0.5, -0.5]
+    assert d.x_float.shape == (2, 1)
+    charges = sorted(d.x_float.flatten().tolist())
+    assert charges == [-0.5, 0.5]
+
+
 def test_sm_lite_small_batch_smoke():
     """SM-lite enumeration at tight caps encodes + batches end-to-end."""
     from indexcalc.lions import (

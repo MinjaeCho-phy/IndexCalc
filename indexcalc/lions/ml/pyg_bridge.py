@@ -19,7 +19,7 @@ from typing import Optional, Sequence
 
 from indexcalc.lions.ml import _require_torch
 from indexcalc.lions.ml.features import (
-    GROUP_ORDER, node_feature_ids, edge_feature_ids,
+    GROUP_ORDER, node_feature_ids, edge_feature_ids, node_charge_features,
 )
 from indexcalc.lions.graph import EncodedGraph
 
@@ -48,12 +48,17 @@ def encoded_to_pyg_data(
         # Defensive: a fully-empty graph would be a degenerate sample.
         # Caller should usually have filtered ZeroTensor → None upstream.
         x = torch.zeros((0, 7), dtype=torch.long)
+        x_float = torch.zeros((0, 1), dtype=torch.float)
     else:
         x = torch.tensor(
             [node_feature_ids(
                 n.kind, n.name, n.rank, n.statistics, n.reps,
             ) for n in g.nodes],
             dtype=torch.long,
+        )
+        x_float = torch.tensor(
+            [node_charge_features(n.reps) for n in g.nodes],
+            dtype=torch.float,
         )
 
     # ── Edges: emit both directions ─────────────────────
@@ -98,6 +103,7 @@ def encoded_to_pyg_data(
 
     return Data(
         x=x,
+        x_float=x_float,
         edge_index=edge_index,
         edge_type=edge_type,
         edge_attr=edge_attr,

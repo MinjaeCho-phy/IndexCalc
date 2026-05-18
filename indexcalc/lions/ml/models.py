@@ -24,6 +24,7 @@ from torch_geometric.nn import RGCNConv, global_mean_pool
 
 from indexcalc.lions.ml.features import (
     GROUP_ORDER, NODE_KIND, NODE_NAME, STATISTICS, REP_VOCAB,
+    num_charge_features,
 )
 
 
@@ -57,9 +58,14 @@ class RGCNClassifier(nn.Module):
         self.emb_u1y  = nn.Embedding(v_u1y,  emb_dim // 2)
         self.emb_lorz = nn.Embedding(v_lorz, emb_dim // 2)
 
+        # I1: numeric charge features (U(1)_Y for now). Concatenated
+        # alongside the categorical embeddings so the GNN can compute
+        # charge sums via message passing.
+        self.n_charge = num_charge_features()
         node_in_dim = (emb_dim * 2          # kind, name
                        + (emb_dim // 2) * 4 # stat, su2, u1y, lorentz
-                       + 1)                 # rank scalar
+                       + 1                  # rank scalar
+                       + self.n_charge)     # u1y charge etc.
         self.node_proj = nn.Linear(node_in_dim, hidden_dim)
 
         self.convs = nn.ModuleList([
@@ -76,9 +82,13 @@ class RGCNClassifier(nn.Module):
             nn.Linear(hidden_dim, len(GROUP_ORDER)),
         )
 
-    def encode_nodes(self, x: torch.Tensor) -> torch.Tensor:
+    def encode_nodes(
+        self, x: torch.Tensor, x_float: torch.Tensor = None,
+    ) -> torch.Tensor:
         # x: [N, 7] long — see features.node_feature_ids order:
         # [kind, name, rank, stat, su2, u1y, lorentz]
+        # x_float: [N, n_charge] float (I1 charge features). May be None
+        # for back-compat with checkpoints that predate I1.
         kind = self.emb_kind(x[:, 0])
         name = self.emb_name(x[:, 1])
         rank = x[:, 2].float().unsqueeze(-1) / 4.0    # /4 rough normalize
@@ -86,11 +96,18 @@ class RGCNClassifier(nn.Module):
         su2  = self.emb_su2 (x[:, 4])
         u1y  = self.emb_u1y (x[:, 5])
         lorz = self.emb_lorz(x[:, 6])
-        h = torch.cat([kind, name, rank, stat, su2, u1y, lorz], dim=-1)
+        if x_float is None:
+            x_float = torch.zeros(
+                x.shape[0], self.n_charge, device=x.device, dtype=torch.float,
+            )
+        h = torch.cat(
+            [kind, name, rank, stat, su2, u1y, lorz, x_float], dim=-1,
+        )
         return self.node_proj(h)
 
     def forward(self, data):
-        h = self.encode_nodes(data.x)
+        x_float = getattr(data, "x_float", None)
+        h = self.encode_nodes(data.x, x_float)
         for conv in self.convs:
             h = conv(h, data.edge_index, data.edge_type)
             h = F.relu(h)

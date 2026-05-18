@@ -79,6 +79,34 @@ REP_VOCAB: dict[str, dict[str, int]] = {
 }
 
 
+# ─── Numeric scalar features (I1: charge as numeric, 2026-05-18) ────
+
+
+# U(1) charge tag → numeric value. Used as a *numeric* node feature
+# alongside the categorical embedding so the GNN can compute charge
+# sums via message passing (rather than learning charge arithmetic
+# from one-hot rep IDs alone). Default for unmapped / missing tags is
+# 0.0 (consistent with "<none>" being charge-neutral).
+U1Y_CHARGE_VALUE: dict[str, float] = {
+    "<unk>": 0.0, "<none>": 0.0,
+    "0": 0.0, "+1/2": 0.5, "-1/2": -0.5, "+1": 1.0, "-1": -1.0,
+}
+
+
+def node_charge_features(reps: dict[str, str]) -> list[float]:
+    """Return numeric scalar features per node — currently U(1)_Y only.
+
+    Order: [u1y_charge]. Length 1. Extend here if other numeric reps
+    join later (e.g. another U(1) factor).
+    """
+    rep = reps.get("U(1)_Y", "<none>")
+    return [U1Y_CHARGE_VALUE.get(rep, 0.0)]
+
+
+def num_charge_features() -> int:
+    return 1
+
+
 def _lookup(table: dict[str, int], token: str) -> int:
     return table.get(token, table["<unk>"])
 
