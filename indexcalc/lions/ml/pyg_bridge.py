@@ -61,6 +61,17 @@ def encoded_to_pyg_data(
             dtype=torch.float,
         )
 
+    # ── I2: per-node term id + per-graph num_terms ──────
+    # Empty list (legacy / hand-constructed EncodedGraph) ⇒ single-term
+    # fallback so old callers see no behavioural change.
+    if g.node_term_ids:
+        term_id_t = torch.tensor(g.node_term_ids, dtype=torch.long)
+        num_terms_val = int(g.num_terms)
+    else:
+        term_id_t = torch.zeros((len(g.nodes),), dtype=torch.long)
+        num_terms_val = 1
+    num_terms_t = torch.tensor([num_terms_val], dtype=torch.long)
+
     # ── Edges: emit both directions ─────────────────────
     if g.edges:
         src_list, dst_list, type_list, attr_list = [], [], [], []
@@ -112,6 +123,8 @@ def encoded_to_pyg_data(
         scalar_re=scalar_re,
         scalar_im=scalar_im,
         num_nodes=len(g.nodes),
+        term_id=term_id_t,
+        num_terms=num_terms_t,
     )
 
 

@@ -64,6 +64,13 @@ class EncodedGraph:
     labels: dict[str, bool] = field(default_factory=dict)
     field_counts: dict[str, int] = field(default_factory=dict)
     mass_dim: float = 0.0
+    # I2: term partition. For a flat (non-Sum) expression every node has
+    # term_id=0 and num_terms=1. A TensorSum allocates a fresh term_id
+    # for the right branch (recursively), so for ``TensorSum(A, B)`` the
+    # nodes of A get id 0 and those of B get id 1. Empty list ⇒ legacy
+    # construction; pyg_bridge falls back to single-term semantics.
+    node_term_ids: list[int] = field(default_factory=list)
+    num_terms: int = 1
 
 
 # ─── Encoder ─────────────────────────────────────────────
@@ -80,50 +87,65 @@ def graph_encode(expr: TensorExpr) -> Optional[EncodedGraph]:
 
     nodes: list[GraphNode] = []
     edges: list[GraphEdge] = []
+    node_term_ids: list[int] = []
     # index name -> list of (node_id, position, space_name)
     index_occ: dict[str, list[tuple[int, str, str]]] = defaultdict(list)
     scalar: complex = 1
+    # next_term_id[0] = next id to hand out for a fresh TensorSum branch.
+    # Root walk uses term 0; the right branch of each TensorSum allocates
+    # next_term_id[0] and bumps the counter.
+    next_term_id: list[int] = [1]
 
-    def add_node(node: GraphNode) -> int:
+    def add_node(node: GraphNode, term_id: int) -> int:
         nodes.append(node)
+        node_term_ids.append(term_id)
         return len(nodes) - 1
 
-    def add_tensor(t: Tensor) -> int:
+    def add_tensor(t: Tensor, term_id: int) -> int:
         kind = "field" if t.reps else "invariant"
         nid = add_node(GraphNode(
             kind=kind, name=t.name, rank=len(t.indices),
             reps=dict(t.reps), statistics=t.statistics,
-        ))
+        ), term_id)
         for idx in t.indices:
             index_occ[idx.name].append((nid, idx.position, idx.space.name))
         return nid
 
-    def walk(e: TensorExpr) -> list[int]:
+    def walk(e: TensorExpr, term_id: int) -> list[int]:
         """Return the list of node IDs emitted by this subtree (used by
-        PartialDeriv to wire ``acts_on`` edges to its operand tensors)."""
+        PartialDeriv to wire ``acts_on`` edges to its operand tensors).
+
+        ``term_id`` is the TensorSum-branch id assigned to every node
+        emitted in this subtree (unless a nested TensorSum overrides it
+        for its right branch).
+        """
         nonlocal scalar
         if isinstance(e, Tensor):
-            return [add_tensor(e)]
+            return [add_tensor(e, term_id)]
         if isinstance(e, ZeroTensor):
             return []
         if isinstance(e, TensorProduct):
-            return walk(e.left) + walk(e.right)
+            return walk(e.left, term_id) + walk(e.right, term_id)
         if isinstance(e, TensorSum):
-            # F3: single graph for v1; multi-graph batching is the
-            # caller's responsibility if they want per-term split.
-            return walk(e.left) + walk(e.right)
+            # I2: split the right branch into a fresh term id so the ML
+            # readout can pool each summand independently.
+            left_ids = walk(e.left, term_id)
+            new_term = next_term_id[0]
+            next_term_id[0] += 1
+            right_ids = walk(e.right, new_term)
+            return left_ids + right_ids
         if isinstance(e, ScalarMul):
             scalar = scalar * e.scalar
-            return walk(e.expr)
+            return walk(e.expr, term_id)
         if isinstance(e, PartialDeriv):
             op_id = add_node(GraphNode(
                 kind="operator", name="partial", rank=1,
                 reps={}, statistics="bosonic",
-            ))
+            ), term_id)
             index_occ[e.deriv_index.name].append(
                 (op_id, e.deriv_index.position, e.deriv_index.space.name),
             )
-            inner_ids = walk(e.expr)
+            inner_ids = walk(e.expr, term_id)
             for tid in inner_ids:
                 src, dst = (op_id, tid) if op_id < tid else (tid, op_id)
                 edges.append(GraphEdge(
@@ -137,7 +159,7 @@ def graph_encode(expr: TensorExpr) -> Optional[EncodedGraph]:
             )
         raise TypeError(f"unsupported expr type {type(e).__name__}")
 
-    walk(expr)
+    walk(expr, 0)
 
     # Now turn index_occ into contraction edges.
     for name, occs in index_occ.items():
@@ -164,7 +186,10 @@ def graph_encode(expr: TensorExpr) -> Optional[EncodedGraph]:
             space=s1, src_pos=src_pos, dst_pos=dst_pos,
         ))
 
-    return EncodedGraph(nodes=nodes, edges=edges, scalar=scalar)
+    return EncodedGraph(
+        nodes=nodes, edges=edges, scalar=scalar,
+        node_term_ids=node_term_ids, num_terms=next_term_id[0],
+    )
 
 
 def encode_sample(sample: LabeledSample) -> Optional[EncodedGraph]:

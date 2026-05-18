@@ -84,6 +84,90 @@ def test_rgcn_overfits_two_class():
         assert auc == 1.0, f"SU(2) AUC = {auc}, expected 1.0"
 
 
+def _h_norm_pyg(term_label_su2: bool = True):
+    """Single-term |H|² PyG data with SU(2) label set explicitly."""
+    su2 = IndexSpace("su2_fund", dim=2, indices="ij")
+    H = Tensor("H", [su2.upper("i")], reps={"SU(2)": "fund"})
+    Hd = Tensor("Hdag", [su2.lower("i")], reps={"SU(2)": "fund"})
+    g = graph_encode(TensorProduct(H, Hd))
+    g.labels = {grp: term_label_su2 for grp in GROUP_ORDER}
+    return encoded_to_pyg_data(g)
+
+
+def test_per_term_min_aggregation_matches_global_for_single_term():
+    """For a 1-term graph the I2 per-term path must agree (exactly) with
+    the legacy global_mean_pool readout — otherwise we'd silently change
+    the meaning of every non-Sum sample."""
+    from torch_geometric.nn import global_mean_pool
+    torch.manual_seed(0)
+    d = _h_norm_pyg()
+    batch = Batch.from_data_list([d, d, d])
+    model = RGCNClassifier(
+        hidden_dim=32, num_relations=num_relations(),
+        num_layers=2, dropout=0.0,
+    )
+    model.eval()
+    with torch.no_grad():
+        out_per_term = model(batch)
+        # Manually replicate the legacy path: global_mean_pool over batch.
+        x_float = getattr(batch, "x_float", None)
+        h = model.encode_nodes(batch.x, x_float)
+        for conv in model.convs:
+            h = torch.nn.functional.relu(conv(h, batch.edge_index, batch.edge_type))
+        legacy = model.head(global_mean_pool(h, batch.batch))
+    assert torch.allclose(out_per_term, legacy, atol=1e-6)
+
+
+def test_per_term_min_picks_broken_term():
+    """Manually construct logits across two terms and verify that the
+    AND-via-min readout returns the smaller (broken) term's logit."""
+    from indexcalc.core.tensor import TensorSum
+
+    # Build a two-term graph: two scalar |H|² terms with disjoint dummy
+    # names. The min-readout target is structural (each summand has its
+    # own per-term logit); the actual labels don't matter for this test.
+    su2 = IndexSpace("su2_fund", dim=2, indices="ijkl")
+    H1 = Tensor("H", [su2.upper("i")], reps={"SU(2)": "fund"})
+    Hd1 = Tensor("Hdag", [su2.lower("i")], reps={"SU(2)": "fund"})
+    H2 = Tensor("H", [su2.upper("k")], reps={"SU(2)": "fund"})
+    Hd2 = Tensor("Hdag", [su2.lower("k")], reps={"SU(2)": "fund"})
+    inv = graph_encode(TensorProduct(H1, Hd1))
+    inv.labels = {grp: True for grp in GROUP_ORDER}
+    brk = graph_encode(TensorSum(TensorProduct(H1, Hd1),
+                                 TensorProduct(H2, Hd2)))
+    brk.labels = {grp: False for grp in GROUP_ORDER}
+
+    torch.manual_seed(0)
+    model = RGCNClassifier(
+        hidden_dim=32, num_relations=num_relations(),
+        num_layers=2, dropout=0.0,
+    )
+    model.eval()
+    batch = Batch.from_data_list([
+        encoded_to_pyg_data(inv),
+        encoded_to_pyg_data(brk),
+    ])
+    with torch.no_grad():
+        out = model(batch)
+        # Manually pull per-term logits for the second sample and check
+        # that out[1] == min over its two per-term logits.
+        x_float = getattr(batch, "x_float", None)
+        h = model.encode_nodes(batch.x, x_float)
+        for conv in model.convs:
+            h = torch.nn.functional.relu(conv(h, batch.edge_index, batch.edge_type))
+        # composite IDs: graph 0 has 1 term (id 0), graph 1 has 2 terms
+        # (ids 1, 2).
+        from torch_geometric.nn import global_mean_pool
+        offsets = torch.tensor([0, 1])
+        composite = offsets[batch.batch] + batch.term_id
+        pooled = global_mean_pool(h, composite)
+        per_term = model.head(pooled)  # [3, G]
+        expected = torch.minimum(per_term[1], per_term[2])
+    assert torch.allclose(out[1], expected, atol=1e-6)
+    # And graph 0 is single-term → out[0] == per_term[0].
+    assert torch.allclose(out[0], per_term[0], atol=1e-6)
+
+
 def test_auc_implementation():
     """Mann–Whitney AUC sanity: perfect=1, worst=0, random≈0.5."""
     assert auc_roc(

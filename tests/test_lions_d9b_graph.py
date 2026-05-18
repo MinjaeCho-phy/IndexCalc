@@ -14,7 +14,7 @@ Coverage per ``LIONS/notes/graph_encoding_spec.md §6``:
 from __future__ import annotations
 import pytest
 
-from indexcalc.core.tensor import Tensor, TensorProduct, ScalarMul
+from indexcalc.core.tensor import Tensor, TensorProduct, ScalarMul, TensorSum
 from indexcalc.core.deriv import partial
 from indexcalc.core.variation import ZeroTensor
 
@@ -139,6 +139,80 @@ def test_scalar_accumulation():
     assert g.scalar == -1
     # The Tensor node is still emitted (scalar lives outside the graph).
     assert len(g.nodes) == 1
+
+
+# ─── I2: TensorSum term partition ──────────────────────
+
+
+def test_flat_expr_single_term():
+    """Non-Sum expression → num_terms=1, every node term_id=0."""
+    from indexcalc.core.index import IndexSpace
+    su2 = IndexSpace("su2_fund", dim=2, indices="ij")
+    H = Tensor("H", [su2.upper("i")], reps={"SU(2)": "fund"})
+    Hd = Tensor("Hdag", [su2.lower("i")], reps={"SU(2)": "fund"})
+    g = graph_encode(TensorProduct(H, Hd))
+    assert g.num_terms == 1
+    assert g.node_term_ids == [0, 0]
+
+
+def test_tensor_sum_two_terms():
+    """TensorSum(A, B) → A nodes term 0, B nodes term 1."""
+    from indexcalc.core.index import IndexSpace
+    su2 = IndexSpace("su2_fund", dim=2, indices="ijklmn")
+    # Two scalar (no free index) terms with disjoint dummies — mimics
+    # ``augment.add_n3_dangling_term`` after ``_disambiguate_indices``.
+    H_L = Tensor("H", [su2.upper("i")], reps={"SU(2)": "fund"})
+    Hd_L = Tensor("Hdag", [su2.lower("i")], reps={"SU(2)": "fund"})
+    left = TensorProduct(H_L, Hd_L)
+    H_R = Tensor("H", [su2.upper("k")], reps={"SU(2)": "fund"})
+    Hd_R = Tensor("Hdag", [su2.lower("k")], reps={"SU(2)": "fund"})
+    right = TensorProduct(H_R, Hd_R)
+    g = graph_encode(TensorSum(left, right))
+    assert g.num_terms == 2
+    # 4 nodes total: 2 from left (term 0), 2 from right (term 1).
+    assert len(g.nodes) == 4
+    assert g.node_term_ids[:2] == [0, 0]
+    assert g.node_term_ids[2:] == [1, 1]
+
+
+def test_nested_tensor_sum_three_terms():
+    """TensorSum(A, TensorSum(B, C)) → 3 terms, ids 0/1/2."""
+    from indexcalc.core.index import IndexSpace
+    su2 = IndexSpace("su2_fund", dim=2, indices="ijklmnpq")
+    A = TensorProduct(
+        Tensor("H",    [su2.upper("i")], reps={"SU(2)": "fund"}),
+        Tensor("Hdag", [su2.lower("i")], reps={"SU(2)": "fund"}),
+    )
+    B = TensorProduct(
+        Tensor("H",    [su2.upper("k")], reps={"SU(2)": "fund"}),
+        Tensor("Hdag", [su2.lower("k")], reps={"SU(2)": "fund"}),
+    )
+    C = TensorProduct(
+        Tensor("H",    [su2.upper("p")], reps={"SU(2)": "fund"}),
+        Tensor("Hdag", [su2.lower("p")], reps={"SU(2)": "fund"}),
+    )
+    g = graph_encode(TensorSum(A, TensorSum(B, C)))
+    assert g.num_terms == 3
+    # 2 nodes per term (H + Hdag), 3 terms → 6 nodes total.
+    assert g.node_term_ids == [0, 0, 1, 1, 2, 2]
+
+
+def test_partial_node_carries_outer_term_id():
+    """In a flat expression containing PartialDeriv, every node — field
+    and operator alike — gets term 0. (The actual cross-branch case is
+    covered by ``test_tensor_sum_two_terms``; here we only verify the
+    operator's term id is wired via ``walk``'s threading, not stuck at
+    a default.)"""
+    from indexcalc.core.index import IndexSpace
+    st = IndexSpace("spacetime", dim=4, indices="μνλρ", metric="η")
+    su2 = IndexSpace("su2_fund", dim=2, indices="ij")
+    H = Tensor("H", [su2.upper("i")], reps={"SU(2)": "fund"})
+    Hd = Tensor("Hdag", [su2.lower("i")], reps={"SU(2)": "fund"})
+    dH = partial(H, st.lower("μ"))
+    dHd = partial(Hd, st.lower("μ"))
+    g = graph_encode(TensorProduct(dH, dHd))
+    assert g.num_terms == 1
+    assert all(t == 0 for t in g.node_term_ids)
 
 
 # ─── F8: ZeroTensor → None ─────────────────────────────

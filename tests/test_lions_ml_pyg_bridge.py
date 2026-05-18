@@ -134,6 +134,56 @@ def test_charge_numeric_feature():
     assert charges == [-0.5, 0.5]
 
 
+def test_term_id_default_single_term():
+    """Flat (non-Sum) graph → data.term_id all zeros, data.num_terms==1."""
+    g = _h_norm_graph()
+    d = encoded_to_pyg_data(g)
+    assert d.term_id.shape == (2,)
+    assert d.term_id.dtype == torch.long
+    assert d.term_id.tolist() == [0, 0]
+    assert d.num_terms.tolist() == [1]
+
+
+def test_term_id_two_terms_through_bridge():
+    """TensorSum of two |H|² scalars (disjoint dummies) → term_id
+    [0,0,1,1], num_terms=2."""
+    from indexcalc.core.tensor import TensorSum
+    su2 = IndexSpace("su2_fund", dim=2, indices="ijkl")
+    H1 = Tensor("H", [su2.upper("i")], reps={"SU(2)": "fund"})
+    Hd1 = Tensor("Hdag", [su2.lower("i")], reps={"SU(2)": "fund"})
+    H2 = Tensor("H", [su2.upper("k")], reps={"SU(2)": "fund"})
+    Hd2 = Tensor("Hdag", [su2.lower("k")], reps={"SU(2)": "fund"})
+    expr = TensorSum(TensorProduct(H1, Hd1), TensorProduct(H2, Hd2))
+    g = graph_encode(expr)
+    g.labels = {"SU(2)": True, "U(1)_Y": True, "Lorentz": True}
+    d = encoded_to_pyg_data(g)
+    assert d.term_id.tolist() == [0, 0, 1, 1]
+    assert d.num_terms.tolist() == [2]
+
+
+def test_term_id_batches_correctly():
+    """PyG Batch concats per-node term_id along node dim; num_terms
+    becomes [B] (one entry per graph)."""
+    from indexcalc.core.tensor import TensorSum
+    su2 = IndexSpace("su2_fund", dim=2, indices="ijkl")
+    H1 = Tensor("H", [su2.upper("i")], reps={"SU(2)": "fund"})
+    Hd1 = Tensor("Hdag", [su2.lower("i")], reps={"SU(2)": "fund"})
+    H2 = Tensor("H", [su2.upper("k")], reps={"SU(2)": "fund"})
+    Hd2 = Tensor("Hdag", [su2.lower("k")], reps={"SU(2)": "fund"})
+    # One single-term graph (2 nodes) + one two-term graph (4 nodes).
+    flat = graph_encode(TensorProduct(H1, Hd1))
+    flat.labels = {"SU(2)": True}
+    summed = graph_encode(TensorSum(TensorProduct(H1, Hd1),
+                                    TensorProduct(H2, Hd2)))
+    summed.labels = {"SU(2)": False}
+    batch = Batch.from_data_list([
+        encoded_to_pyg_data(flat),
+        encoded_to_pyg_data(summed),
+    ])
+    assert batch.term_id.tolist() == [0, 0, 0, 0, 1, 1]
+    assert batch.num_terms.tolist() == [1, 2]
+
+
 def test_sm_lite_small_batch_smoke():
     """SM-lite enumeration at tight caps encodes + batches end-to-end."""
     from indexcalc.lions import (

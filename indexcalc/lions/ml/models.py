@@ -8,7 +8,9 @@ Per ``LIONS/notes/ml_training_v1.md`` §6.1:
   (kind, name, statistics, rep_SU(2), rep_U(1)_Y, rep_Lorentz)
   + scalar rank (normalized).
 - Edge dispatch = RGCNConv on packed ``edge_type`` (G7 default).
-- Graph readout = global_mean_pool.
+- Graph readout = global_mean_pool, **per TensorSum term** (I2).
+  Per-term logits are aggregated with ``min`` across terms — sum is
+  invariant ⇔ every term is invariant ⇒ logit-space AND ≈ min.
 - Output = 3-head logit vector (per ``features.GROUP_ORDER``).
 """
 
@@ -112,5 +114,34 @@ class RGCNClassifier(nn.Module):
             h = conv(h, data.edge_index, data.edge_type)
             h = F.relu(h)
             h = self.dropout(h)
-        g = global_mean_pool(h, data.batch)
-        return self.head(g)   # [batch, num_groups]
+
+        term_id = getattr(data, "term_id", None)
+        num_terms = getattr(data, "num_terms", None)
+        if term_id is None or num_terms is None:
+            # Back-compat: pre-I2 Data → single-term global pool.
+            g = global_mean_pool(h, data.batch)
+            return self.head(g)
+
+        # I2: pool per (batch, term), apply head per term, AND-aggregate
+        # across terms (min in logit space).
+        B = int(num_terms.shape[0])
+        # Per-batch offset = cumsum(num_terms) shifted right by one so
+        # batch 0 starts at offset 0.
+        offsets = torch.cat([
+            torch.zeros(1, dtype=torch.long, device=h.device),
+            num_terms.cumsum(0)[:-1],
+        ])
+        composite = offsets[data.batch] + term_id  # [N]
+        pooled = global_mean_pool(h, composite)    # [total_terms, hidden]
+        logits_per_term = self.head(pooled)        # [total_terms, G]
+
+        G = logits_per_term.shape[-1]
+        batch_for_term = torch.repeat_interleave(
+            torch.arange(B, device=h.device), num_terms,
+        )
+        out = logits_per_term.new_full((B, G), float("inf"))
+        idx = batch_for_term.unsqueeze(-1).expand(-1, G)
+        out.scatter_reduce_(
+            0, idx, logits_per_term, reduce="amin", include_self=False,
+        )
+        return out
