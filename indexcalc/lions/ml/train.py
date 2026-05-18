@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader
 
 from indexcalc.lions.ml.datasets import LionsPyGDataset, collate_pyg
 from indexcalc.lions.ml.features import GROUP_ORDER, num_relations
-from indexcalc.lions.ml.models import RGCNClassifier
+from indexcalc.lions.ml.models import RGCNClassifier, GTClassifier
 
 
 # ─── Metrics ─────────────────────────────────────────────
@@ -146,14 +146,21 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data-dir", type=Path,
                    default=Path.home() / "Minjae/LIONS/data/v1-toy")
+    p.add_argument("--model", choices=["rgcn", "gt"], default="rgcn",
+                   help="rgcn = RGCNClassifier (R-GCN baseline), "
+                        "gt = GTClassifier (Graph Transformer)")
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--hidden-dim", type=int, default=64)
     p.add_argument("--num-layers", type=int, default=3)
+    p.add_argument("--num-heads", type=int, default=4,
+                   help="GT only — ignored for rgcn")
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=1e-2)
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--train-subset", type=float, default=1.0,
+                   help="fraction of training set to keep (1.0 = all)")
     p.add_argument("--out", type=Path,
                    default=Path.home() / "Minjae/LIONS/data/v1-toy/runs")
     p.add_argument("--device", type=str, default="cpu")
@@ -165,6 +172,13 @@ def main():
     train_ds = LionsPyGDataset(args.data_dir / "train.json")
     val_ds   = LionsPyGDataset(args.data_dir / "val.json")
     test_ds  = LionsPyGDataset(args.data_dir / "test.json")
+    if args.train_subset < 1.0:
+        import random as _r
+        keep_n = max(1, int(len(train_ds._data) * args.train_subset))
+        _r.Random(args.seed).shuffle(train_ds._data)
+        train_ds._data = train_ds._data[:keep_n]
+        print(f"  train subset → {keep_n} samples "
+              f"({args.train_subset:.2f} fraction)", flush=True)
     print(f"  train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}",
           flush=True)
 
@@ -181,14 +195,25 @@ def main():
                               shuffle=False, collate_fn=collate_pyg)
 
     device = torch.device(args.device)
-    model = RGCNClassifier(
-        hidden_dim=args.hidden_dim,
-        num_relations=num_relations(),
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-    ).to(device)
+    if args.model == "rgcn":
+        model = RGCNClassifier(
+            hidden_dim=args.hidden_dim,
+            num_relations=num_relations(),
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+        ).to(device)
+    elif args.model == "gt":
+        model = GTClassifier(
+            hidden_dim=args.hidden_dim,
+            num_relations=num_relations(),
+            num_layers=args.num_layers,
+            num_heads=args.num_heads,
+            dropout=args.dropout,
+        ).to(device)
+    else:
+        raise ValueError(f"unknown --model {args.model!r}")
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"  model params: {n_params:,}", flush=True)
+    print(f"  model: {args.model}  params: {n_params:,}", flush=True)
 
     optimizer = torch.optim.AdamW(model.parameters(),
                                   lr=args.lr, weight_decay=args.weight_decay)
@@ -240,10 +265,13 @@ def main():
 
     (args.out / "log.json").write_text(json.dumps({
         "config": {
+            "model": args.model,
             "epochs": args.epochs, "batch_size": args.batch_size,
             "hidden_dim": args.hidden_dim, "num_layers": args.num_layers,
+            "num_heads": args.num_heads,
             "lr": args.lr, "weight_decay": args.weight_decay,
             "dropout": args.dropout, "seed": args.seed,
+            "train_subset": args.train_subset,
         },
         "n_params": n_params,
         "pos_weight": {g: float(pos_w[i]) for i, g in enumerate(GROUP_ORDER)},

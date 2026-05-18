@@ -15,7 +15,7 @@ from indexcalc.core.tensor import Tensor, TensorProduct
 from indexcalc.lions import graph_encode
 from indexcalc.lions.ml.features import GROUP_ORDER, num_relations
 from indexcalc.lions.ml.pyg_bridge import encoded_to_pyg_data
-from indexcalc.lions.ml.models import RGCNClassifier
+from indexcalc.lions.ml.models import RGCNClassifier, GTClassifier
 from indexcalc.lions.ml.train import auc_roc
 
 
@@ -166,6 +166,45 @@ def test_per_term_min_picks_broken_term():
     assert torch.allclose(out[1], expected, atol=1e-6)
     # And graph 0 is single-term → out[0] == per_term[0].
     assert torch.allclose(out[0], per_term[0], atol=1e-6)
+
+
+def test_gt_forward_shape():
+    """GT forward returns the same [batch, num_groups] shape as RGCN."""
+    data_list = _two_class_synthetic(n_per_class=2)
+    batch = Batch.from_data_list(data_list)
+    model = GTClassifier(
+        hidden_dim=32, num_relations=num_relations(),
+        num_layers=2, num_heads=4, dropout=0.0,
+    )
+    out = model(batch)
+    assert out.shape == (4, len(GROUP_ORDER))
+    assert out.dtype == torch.float32
+
+
+def test_gt_overfits_two_class():
+    """GT can perfectly separate the two trivial classes in 30 epochs."""
+    torch.manual_seed(0)
+    data_list = _two_class_synthetic(n_per_class=8)
+    loader = [Batch.from_data_list(data_list)]
+    model = GTClassifier(
+        hidden_dim=32, num_relations=num_relations(),
+        num_layers=2, num_heads=4, dropout=0.0,
+    )
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    loss_fn = torch.nn.BCEWithLogitsLoss()
+    for _ in range(30):
+        for batch in loader:
+            opt.zero_grad()
+            logits = model(batch)
+            loss = loss_fn(logits, batch.y)
+            loss.backward()
+            opt.step()
+    with torch.no_grad():
+        out = model(Batch.from_data_list(data_list))
+        probs = torch.sigmoid(out)
+        ys = torch.cat([d.y for d in data_list], dim=0)
+        auc = auc_roc(ys[:, 0], probs[:, 0])
+        assert auc == 1.0, f"GT SU(2) AUC={auc}, expected 1.0"
 
 
 def test_auc_implementation():
