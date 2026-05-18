@@ -248,3 +248,142 @@ def expand_dataset(
     return [v for s in samples for v in augment_sample(
         s, include_swap=include_swap, scales=scales,
     )]
+
+
+# ─── N3: dangling-term hard negatives ──────────────────
+
+
+from indexcalc.core.index import Index
+
+
+def _collect_index_names(expr: TensorExpr) -> set[str]:
+    """Return every index name occurring in ``expr`` (free + dummy)."""
+    names: set[str] = set()
+    if isinstance(expr, Tensor):
+        for idx in expr.indices:
+            names.add(idx.name)
+        return names
+    if isinstance(expr, ZeroTensor):
+        for idx in expr.free_indices:
+            names.add(idx.name)
+        return names
+    if isinstance(expr, (TensorProduct, TensorSum)):
+        return _collect_index_names(expr.left) | _collect_index_names(expr.right)
+    if isinstance(expr, ScalarMul):
+        return _collect_index_names(expr.expr)
+    if isinstance(expr, PartialDeriv):
+        return _collect_index_names(expr.expr) | {expr.deriv_index.name}
+    raise TypeError(f"_collect_index_names: unsupported {type(expr).__name__}")
+
+
+def _disambiguate_indices(
+    p_expr: TensorExpr, q_expr: TensorExpr, *, q_suffix: str = "_q",
+) -> TensorExpr:
+    """Rename every index name in ``q_expr`` that collides with ``p_expr``.
+
+    Strategy: append ``q_suffix`` to colliding names; if still clash, add
+    a numeric counter. Returns a renamed q_expr where every index name
+    is disjoint from p_expr's index set.
+    """
+    p_names = _collect_index_names(p_expr)
+    q_names = _collect_index_names(q_expr)
+    mapping: dict[str, str] = {}
+    for n in q_names:
+        if n not in p_names:
+            continue
+        candidate = n + q_suffix
+        i = 0
+        while candidate in p_names or candidate in q_names or candidate in mapping.values():
+            i += 1
+            candidate = f"{n}{q_suffix}{i}"
+        mapping[n] = candidate
+    if not mapping:
+        return q_expr
+    return rename_index(q_expr, mapping)
+
+
+def add_n3_dangling_term(
+    positive: LabeledSample,
+    broken_term: LabeledSample,
+    generators: dict[str, Generator],
+    *,
+    rng=None,
+) -> LabeledSample:
+    """Form ``TensorSum(positive.expr, broken_term.expr)`` after dummy
+    disambiguation, then re-label via the oracle.
+
+    The resulting sample has *same node-feature distribution* as a longer
+    enumeration sample but its invariance status depends on whether each
+    term is independently invariant. This is a topology-level hard
+    negative: rep tags alone cannot decide it.
+    """
+    q_disambig = _disambiguate_indices(positive.expr, broken_term.expr)
+    new_expr = TensorSum(positive.expr, q_disambig)
+    new_labels = label_expression(new_expr, generators)
+    # Combined metadata (sum of counts, max of mass dim — neither is
+    # exact, but these fields are advisory for ML features).
+    combined_field_counts: dict[str, int] = {}
+    for d in (positive.field_counts, broken_term.field_counts):
+        for k, v in d.items():
+            combined_field_counts[k] = combined_field_counts.get(k, 0) + v
+    return LabeledSample(
+        expr=new_expr,
+        labels=new_labels,
+        mass_dim=max(positive.mass_dim, broken_term.mass_dim),
+        field_counts=combined_field_counts,
+        partial_count=positive.partial_count + broken_term.partial_count,
+        invariant_counts={},
+        provenance="hard_negative_n3",
+    )
+
+
+def enumerate_n3_negatives(
+    positive_pool: list[LabeledSample],
+    broken_pool: list[LabeledSample],
+    generators: dict[str, Generator],
+    *,
+    n_per_seed: int = 2,
+    rng=None,
+    require_label_change_from_pos: bool = True,
+) -> list[LabeledSample]:
+    """For each positive in ``positive_pool``, sample ``n_per_seed``
+    broken terms from ``broken_pool`` and emit one N3 negative each.
+
+    Parameters
+    ----------
+    positive_pool
+        Seeds. Typically fully-invariant samples — their labels remain
+        unchanged after adding a broken term IF the broken term's labels
+        are all True (which we filter against), so we require the broken
+        pool to be NON-fully-invariant.
+    broken_pool
+        Broken samples. ``label_samples`` output where at least one
+        group label is False.
+    n_per_seed
+        Number of broken terms attached per positive seed.
+    require_label_change_from_pos
+        If True, drop combinations whose label dict is identical to the
+        seed positive's (i.e. the broken term turned out to also break
+        in a way that the simplifier happens to cancel). Default True.
+    """
+    import random as _random
+    if rng is None:
+        rng = _random.Random(0)
+
+    out: list[LabeledSample] = []
+    if not broken_pool:
+        return out
+    for pos in positive_pool:
+        picks = rng.sample(
+            broken_pool, k=min(n_per_seed, len(broken_pool)),
+        )
+        for q in picks:
+            try:
+                neg = add_n3_dangling_term(pos, q, generators)
+            except Exception:
+                continue
+            if (require_label_change_from_pos
+                    and neg.labels == pos.labels):
+                continue
+            out.append(neg)
+    return out

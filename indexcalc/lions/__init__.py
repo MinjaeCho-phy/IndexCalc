@@ -53,6 +53,8 @@ from indexcalc.lions.augment import (
     scale_by,
     augment_sample,
     expand_dataset,
+    add_n3_dangling_term,
+    enumerate_n3_negatives,
 )
 from indexcalc.lions.tokenizer import (
     expr_to_tokens,
@@ -101,6 +103,8 @@ __all__ = [
     "scale_by",
     "augment_sample",
     "expand_dataset",
+    "add_n3_dangling_term",
+    "enumerate_n3_negatives",
     "expr_to_tokens",
     "tokens_to_expr",
     "build_vocab",

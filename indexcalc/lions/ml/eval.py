@@ -130,6 +130,37 @@ def print_report(res: dict):
           f"{res['n_samples']} samples)")
 
 
+def print_provenance_breakdown(res: dict):
+    """Per-provenance accuracy + all-3-correct rate.
+
+    Reveals whether hard negatives (e.g. ``hard_negative_n3``) are
+    actually harder than wrong-rep ones (``negative``).
+    """
+    y_true = res["y_true"]
+    y_pred = res["y_pred"]
+    samples = res["samples"]
+    from collections import defaultdict
+    by_prov: dict[str, list[int]] = defaultdict(list)
+    for i, s in enumerate(samples):
+        by_prov[s.provenance].append(i)
+    print("\n── Per-provenance accuracy ──")
+    print(f"{'provenance':<22} {'n':>5}  "
+          f"{'SU(2)':>8} {'U(1)_Y':>8} {'Lorentz':>8}  "
+          f"{'all3':>8}")
+    for prov in sorted(by_prov):
+        idx = by_prov[prov]
+        if not idx:
+            continue
+        n = len(idx)
+        acc_per_group = []
+        for j in range(len(GROUP_ORDER)):
+            correct = (y_pred[idx, j] == y_true[idx, j]).float().mean()
+            acc_per_group.append(correct.item())
+        all3 = (y_pred[idx] == y_true[idx]).all(dim=1).float().mean().item()
+        cells = "  ".join(f"{a:8.4f}" for a in acc_per_group)
+        print(f"{prov:<22} {n:>5d}  {cells}  {all3:>8.4f}")
+
+
 def print_examples(res: dict, n: int = 5):
     """Show n correctly classified + n misclassified samples (if any)."""
     y_true = res["y_true"]
@@ -190,6 +221,7 @@ def main():
         hidden_dim=args.hidden_dim, num_layers=args.num_layers,
     )
     print_report(res)
+    print_provenance_breakdown(res)
     print_examples(res, n=args.examples)
 
 
