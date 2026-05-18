@@ -39,6 +39,7 @@ from indexcalc.core.generator import (
     su_n_adj_action, su_n_fund_action, make_su_n_generator,
     lorentz_spinor_action, lorentz_vector_action,
     make_lorentz_spinor_generator,
+    make_o_n_generator,
 )
 from indexcalc.core.substitution import apply_generator
 from indexcalc.evaluate.component import evaluate
@@ -85,6 +86,7 @@ __all__ = [
     "su_n_adj_action", "su_n_fund_action", "make_su_n_generator",
     "lorentz_spinor_action", "lorentz_vector_action",
     "make_lorentz_spinor_generator",
+    "make_o_n_generator",
     "apply_generator",
     "evaluate",
     "Coordinates", "parse_signature",

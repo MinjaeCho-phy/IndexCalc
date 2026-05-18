@@ -162,3 +162,43 @@ def standard_lorentz_invariants() -> list[InvariantTensor]:
             "epsilon4", g, ("frame_lower",) * 4, "totally_antisymmetric"
         ),
     ]
+
+
+def standard_o_n_invariants(N: int) -> list[InvariantTensor]:
+    """$O(N)$ vector rep의 standard invariants — $\\delta_{ij}$ (symmetric metric)
+    그리고 mixed identity $\\delta^i{}_j$.
+
+    Note: $\\epsilon_{i_1\\cdots i_N}$은 $O(N)$이 아닌 $SO(N)$ 한정 invariant
+    (improper rotation에서 sign flip). ``standard_so_n_invariants``에 등록.
+    """
+    g = f"O({N})"
+    return [
+        InvariantTensor(
+            "delta", g, ("vector_lower", "vector_lower"), "symmetric"
+        ),
+        InvariantTensor(
+            "delta_mixed", g, ("vector_upper", "vector_lower"), None
+        ),
+    ]
+
+
+def standard_so_n_invariants(N: int) -> list[InvariantTensor]:
+    """$SO(N)$ vector rep — $O(N)$의 invariants + $\\epsilon_{i_1\\cdots i_N}$.
+
+    Parameters
+    ----------
+    N : int
+        벡터 rep의 차원 (= group의 fundamental action 차원).
+    """
+    g = f"SO({N})"
+    return [
+        InvariantTensor(
+            "delta", g, ("vector_lower", "vector_lower"), "symmetric"
+        ),
+        InvariantTensor(
+            "delta_mixed", g, ("vector_upper", "vector_lower"), None
+        ),
+        InvariantTensor(
+            "epsilon", g, ("vector_lower",) * N, "totally_antisymmetric"
+        ),
+    ]

@@ -89,6 +89,15 @@ def rename_index(expr: TensorExpr, mapping: dict[str, str]) -> TensorExpr:
             rename_index(expr.expr, mapping), new_idx, expr.connections,
         )
 
+    # TimeDeriv / ScalarFunction — 인덱스 없음. inner만 재귀.
+    from indexcalc.adm import TimeDeriv
+    if isinstance(expr, TimeDeriv):
+        return TimeDeriv(rename_index(expr.expr, mapping))
+
+    from indexcalc.core.scalar_function import ScalarFunction
+    if isinstance(expr, ScalarFunction):
+        return ScalarFunction(expr.name, rename_index(expr.arg, mapping))
+
     raise NotImplementedError(
         f"rename_index not implemented for {type(expr).__name__}"
     )

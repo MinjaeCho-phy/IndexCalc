@@ -106,6 +106,28 @@ def apply_generator(expr: TensorExpr, generator: Generator) -> TensorExpr:
             return ZeroTensor([expr.deriv_index] + inner.free_indices)
         return type(expr)(inner, expr.deriv_index, expr.connections)
 
+    # TimeDeriv: 시간 미분은 글로벌 (non-time) symmetry와 commute.
+    #   δ(\\dot T) = \\dot{δT}. inner이 invariant이면 결과도 invariant.
+    # adm.TimeDeriv는 NR mechanics 용으로도 그대로 재활용.
+    from indexcalc.adm import TimeDeriv
+    if isinstance(expr, TimeDeriv):
+        inner = apply_generator(expr.expr, generator)
+        if isinstance(inner, ZeroTensor):
+            return ZeroTensor(expr.free_indices)
+        return TimeDeriv(inner)
+
+    # ScalarFunction: δ(f(I)) = f'(I) δI. δI이 ZeroTensor이면 결과 ZeroTensor.
+    # 아니면 f'(I) · δI 형태로 symbolic 유지 (invariant이 아님을 표현).
+    from indexcalc.core.scalar_function import ScalarFunction
+    if isinstance(expr, ScalarFunction):
+        delta_arg = apply_generator(expr.arg, generator)
+        if isinstance(delta_arg, ZeroTensor):
+            return ZeroTensor([])
+        return _simplify_zeros(TensorProduct(
+            ScalarFunction(f"{expr.name}_prime", expr.arg),
+            delta_arg,
+        ))
+
     raise NotImplementedError(
         f"apply_generator not implemented for {type(expr).__name__}"
     )

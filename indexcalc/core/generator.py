@@ -657,6 +657,57 @@ def make_su_n_generator(
     return gen
 
 
+def make_o_n_generator(
+    group: Group,
+    vector_space: IndexSpace,
+    parameter_names: tuple = ("a", "b"),
+    generator_name: str = "M",
+    name: Optional[str] = None,
+) -> Generator:
+    """$O(N)$ 또는 $SO(N)$ Group의 vector rep + singlet generator.
+
+    vector rep 작용은 ``lorentz_vector_action`` 그대로 재활용 ($M^{ab,c}{}_d$
+    rep matrix 형식). $SO(N)$ Euclidean은 $SO(1, D-1)$의 Wick-rotated 친척이라
+    IR 표현 일치.
+
+    $SO(N)$ vs $O(N)$ 구분은 invariant tensor 단계에서 처리
+    (ε_{i_1..i_N}는 SO(N) 한정). generator/algebra 수준에서 동일.
+
+    **Backend gap (v2.5 도중 확인):** δ-bilinear $\\delta_{ij}V^iV^j$의 회전
+    invariance를 oracle(apply_generator + simplify)만으로 확인하려면
+    metric absorption + $M^{ab}{}_{ij}$의 vector-index antisymmetric 인코딩
+    + post-absorption antisymmetric_pairs 추론, 세 가지의 coupled 변경 필요.
+    v2.5 범위에서 단일 fix가 작음. ``lions.probe._structural_check``를
+    fallback으로 유지해서 hybrid oracle 유지. v3+ 의 backend cleanup
+    마일스톤에서 단일 path로 통일.
+
+    Examples
+    --------
+    >>> so3 = Group("SO(3)", dim=3, abelian=False)
+    >>> so3.add_rep("vector", dim=3)
+    >>> so3.add_rep("singlet", dim=1)
+    >>> vec = IndexSpace("so3_vec", dim=3, indices="ijklmn", metric="delta")
+    >>> g = make_o_n_generator(so3, vec)
+    >>> g.has_action("vector") and g.has_action("singlet")
+    True
+    """
+    if group.abelian:
+        raise ValueError(
+            f"make_o_n_generator requires non-abelian group, got {group.name!r}"
+        )
+    gen = Generator(name or f"M_{group.name}", group)
+    vec_act = lorentz_vector_action(
+        vector_space, parameter_names, generator_name=generator_name,
+    )
+    if group.has_rep("vector"):
+        gen.declare_action("vector", vec_act)
+    if group.has_rep("singlet"):
+        gen.declare_action(
+            "singlet", lambda field: ZeroTensor(field.free_indices),
+        )
+    return gen
+
+
 def make_u1_generator(group: Group, name: Optional[str] = None) -> Generator:
     """U(1) Group에 등록된 모든 charged rep에 대해 자동으로 action을 다는 헬퍼.
 
