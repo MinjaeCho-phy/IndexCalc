@@ -32,6 +32,9 @@ NODE_NAME = {
     "Sigma": 14, "P_L": 15, "P_R": 16, "gamma5": 17,
     # operators
     "partial": 20, "covariant_deriv": 21,
+    # v2 NR mechanics fields
+    "Phi": 30, "Psi": 31, "A": 32, "B": 33, "C": 34,
+    "TimeDeriv": 40, "ScalarFunction": 41,
 }
 
 STATISTICS = {"<unk>": 0, "bosonic": 1, "fermionic": 2}
@@ -46,15 +49,26 @@ EDGE_SPACE = {
     "<unk>": 0, "": 1,
     "spacetime": 2, "su2_adj": 3, "su2_fund": 4, "su3_fund": 5,
     "su3_adj": 6, "dirac": 7, "frame": 8,
+    # v2: NR mechanics vector spaces
+    "so3_vec": 9, "so2_vec": 10, "so4_vec": 11,
 }
 
 POSITION = {"<unk>": 0, "": 1, "upper": 2, "lower": 3}
 
 
 # ─── Group label order (Task 1 y vector) ─────────────────
+#
+# v1: ("SU(2)", "U(1)_Y", "Lorentz") — SM-lite gauge + Lorentz
+# v2: + ("O(3)", "SO(3)") — NR mechanics orthogonal groups
+#
+# Append-only so v1 dataset/model encodings remain length-prefix compatible
+# (existing 3 bits still align). New rows default missing reps to "<none>".
 
 
-GROUP_ORDER: tuple[str, ...] = ("SU(2)", "U(1)_Y", "Lorentz")
+GROUP_ORDER: tuple[str, ...] = (
+    "SU(2)", "U(1)_Y", "Lorentz",          # v1 (SM-lite)
+    "O(3)", "SO(3)",                       # v2 (NR mechanics)
+)
 
 
 # ─── Per-group rep vocab (for k-hot node feature) ────────
@@ -75,6 +89,14 @@ REP_VOCAB: dict[str, dict[str, int]] = {
         "spinor": 4, "conj_spinor": 5,
         "L_spinor": 6, "R_spinor": 7,
         "conj_L_spinor": 8, "conj_R_spinor": 9,
+    },
+    "O(3)": {
+        "<unk>": 0, "<none>": 1,
+        "singlet": 2, "vector": 3,
+    },
+    "SO(3)": {
+        "<unk>": 0, "<none>": 1,
+        "singlet": 2, "vector": 3,
     },
 }
 
