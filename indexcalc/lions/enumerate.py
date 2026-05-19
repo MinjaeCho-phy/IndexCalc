@@ -241,28 +241,30 @@ def _matching_to_factors_and_renames(
         # (a, b both upper) → insert tensor with both LOWER, same names.
         inv_position = "upper" if a.position == "lower" else "lower"
 
+        if space.metric:
+            tensor = Tensor(
+                "eta",
+                [Index(a.name, space, inv_position),
+                 Index(b.name, space, inv_position)],
+                symmetric_pairs=[(0, 1)], reps={},
+            )
+            extra.append(tensor)
+            continue
+
+        # Metric-less space (e.g., SU(N) fundamental).  A 2-slot ε
+        # is invariant *only* on dim=2 (SU(2)).  For dim ≥ 3 a 2-slot
+        # ε is **not** an invariant — the genuine invariant is the
+        # N-slot ε that the caller passes through ``invariant_alphabet``.
+        # So drop this matching to avoid emitting bogus ε_{ij} factors
+        # that confuse downstream labelers and the model.
+        if space.dim != 2:
+            return None
+
         if a.position == "lower":
-            if space.metric:
-                tensor = Tensor(
-                    "eta",
-                    [Index(a.name, space, inv_position),
-                     Index(b.name, space, inv_position)],
-                    symmetric_pairs=[(0, 1)], reps={},
-                )
-            else:
-                tensor = make_epsilon_su2_upper(space, a.name, b.name)
-            extra.append(tensor)
+            tensor = make_epsilon_su2_upper(space, a.name, b.name)
         else:
-            if space.metric:
-                tensor = Tensor(
-                    "eta",
-                    [Index(a.name, space, inv_position),
-                     Index(b.name, space, inv_position)],
-                    symmetric_pairs=[(0, 1)], reps={},
-                )
-            else:
-                tensor = make_epsilon_su2(space, a.name, b.name)
-            extra.append(tensor)
+            tensor = make_epsilon_su2(space, a.name, b.name)
+        extra.append(tensor)
 
     return extra, renames
 
