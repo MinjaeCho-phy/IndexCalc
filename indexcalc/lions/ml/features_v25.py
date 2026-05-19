@@ -45,6 +45,36 @@ NODE_NAME = {
 }
 
 
+# ─── Anonymize policy: kind decided by name, not by reps ────
+# Used in datasets_v25._encode_to_pyg to override graph_encode's
+# reps-based kind so user input with empty/dummy reps still classifies
+# correctly.
+
+INVARIANT_TENSOR_NAMES = frozenset({
+    "eta", "delta", "gamma", "epsilon",
+    # v1.x spinor projectors / Lorentz invariants — included for legacy
+    # compatibility even though v2.5 doesn't enumerate them yet.
+    "P_L", "P_R", "gamma5", "Sigma",
+})
+
+OPERATOR_NAMES = frozenset({"partial", "TimeDeriv", "ScalarFunction"})
+
+
+def kind_from_name(name: str, fallback: str = "field") -> str:
+    """Decide a node's kind purely from its name, ignoring ``reps``.
+
+    Operator names → "operator", invariant tensor names → "invariant",
+    anything else → ``fallback`` (default "field"). The fallback lets
+    a user input with an empty reps dict (the anonymize ideal) still
+    end up as a field rather than being demoted to "invariant".
+    """
+    if name in OPERATOR_NAMES:
+        return "operator"
+    if name in INVARIANT_TENSOR_NAMES:
+        return "invariant"
+    return fallback
+
+
 # ─── Property hint vocab ─────────────────────────────────
 #
 # "unknown" handles the blank-variant case (field_properties == {}).

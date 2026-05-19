@@ -21,7 +21,7 @@ from typing import Sequence
 from indexcalc.lions.ml import _require_torch
 from indexcalc.lions.ml.features_v25 import (
     LABEL_ORDER, FIELD_TOKEN_IDS,
-    node_feature_ids_v25,
+    node_feature_ids_v25, kind_from_name,
 )
 from indexcalc.lions.ml.features import edge_feature_ids
 from indexcalc.lions.serializer import expr_from_dict, space_from_dict
@@ -73,8 +73,17 @@ def _encode_to_pyg(g: EncodedGraph, hints: dict, labels: dict,
             primary_dim, primary_metric = n.index_spaces[0]
         else:
             primary_dim, primary_metric = 0, "unknown"
+        # M5.AN: decide kind from the node's name rather than its reps
+        # so user input with empty/dummy reps still classifies as a field.
+        # ``n.kind`` from graph_encode stays the trusted source for
+        # operators (PartialDeriv/TimeDeriv/ScalarFunction) — those
+        # branches set kind directly, never via reps.
+        if n.kind == "operator":
+            kind = "operator"
+        else:
+            kind = kind_from_name(n.name, fallback="field")
         feats = node_feature_ids_v25(
-            n.kind, n.name, n.rank, n.statistics,
+            kind, n.name, n.rank, n.statistics,
             stats_hint=h.get("stats_hint", "unknown"),
             antisym_hint=h.get("antisym_hint", "unknown"),
             primary_dim=primary_dim, primary_metric=primary_metric,
