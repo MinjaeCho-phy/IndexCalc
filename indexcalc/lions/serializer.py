@@ -29,6 +29,8 @@ from indexcalc.core.tensor import (
 )
 from indexcalc.core.deriv import PartialDeriv, CovariantDeriv
 from indexcalc.core.variation import ZeroTensor
+from indexcalc.core.scalar_function import ScalarFunction
+from indexcalc.adm import TimeDeriv
 
 from indexcalc.lions.dataset import LabeledSample
 
@@ -132,6 +134,17 @@ def expr_to_dict(expr: TensorExpr) -> dict:
             "expr": expr_to_dict(expr.expr),
             "deriv_index": index_to_dict(expr.deriv_index),
         }
+    if isinstance(expr, TimeDeriv):
+        return {
+            "type": "TimeDeriv",
+            "expr": expr_to_dict(expr.expr),
+        }
+    if isinstance(expr, ScalarFunction):
+        return {
+            "type": "ScalarFunction",
+            "name": expr.name,
+            "arg": expr_to_dict(expr.arg),
+        }
     if isinstance(expr, ZeroTensor):
         return {
             "type": "ZeroTensor",
@@ -178,6 +191,10 @@ def expr_from_dict(d: dict, spaces: dict[str, IndexSpace]) -> TensorExpr:
             expr_from_dict(d["expr"], spaces),
             index_from_dict(d["deriv_index"], spaces),
         )
+    if t == "TimeDeriv":
+        return TimeDeriv(expr_from_dict(d["expr"], spaces))
+    if t == "ScalarFunction":
+        return ScalarFunction(d["name"], expr_from_dict(d["arg"], spaces))
     if t == "ZeroTensor":
         return ZeroTensor(
             [index_from_dict(i, spaces) for i in d.get("free_indices", [])],
@@ -205,6 +222,10 @@ def collect_spaces(expr: TensorExpr) -> dict[str, IndexSpace]:
             walk(e.expr)
         elif isinstance(e, PartialDeriv):
             walk(e.expr); visit_index(e.deriv_index)
+        elif isinstance(e, TimeDeriv):
+            walk(e.expr)
+        elif isinstance(e, ScalarFunction):
+            walk(e.arg)
         elif isinstance(e, ZeroTensor):
             for i in e.free_indices:
                 visit_index(i)

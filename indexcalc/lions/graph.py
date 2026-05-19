@@ -29,6 +29,8 @@ from indexcalc.core.tensor import (
 )
 from indexcalc.core.deriv import PartialDeriv, CovariantDeriv
 from indexcalc.core.variation import ZeroTensor
+from indexcalc.core.scalar_function import ScalarFunction
+from indexcalc.adm import TimeDeriv
 
 from indexcalc.lions.dataset import LabeledSample
 
@@ -146,6 +148,32 @@ def graph_encode(expr: TensorExpr) -> Optional[EncodedGraph]:
                 (op_id, e.deriv_index.position, e.deriv_index.space.name),
             )
             inner_ids = walk(e.expr, term_id)
+            for tid in inner_ids:
+                src, dst = (op_id, tid) if op_id < tid else (tid, op_id)
+                edges.append(GraphEdge(
+                    src=src, dst=dst, kind="acts_on",
+                    space="", src_pos="", dst_pos="",
+                ))
+            return [op_id]
+        if isinstance(e, TimeDeriv):
+            op_id = add_node(GraphNode(
+                kind="operator", name="TimeDeriv", rank=0,
+                reps={}, statistics="bosonic",
+            ), term_id)
+            inner_ids = walk(e.expr, term_id)
+            for tid in inner_ids:
+                src, dst = (op_id, tid) if op_id < tid else (tid, op_id)
+                edges.append(GraphEdge(
+                    src=src, dst=dst, kind="acts_on",
+                    space="", src_pos="", dst_pos="",
+                ))
+            return [op_id]
+        if isinstance(e, ScalarFunction):
+            op_id = add_node(GraphNode(
+                kind="operator", name="ScalarFunction", rank=0,
+                reps={}, statistics="bosonic",
+            ), term_id)
+            inner_ids = walk(e.arg, term_id)
             for tid in inner_ids:
                 src, dst = (op_id, tid) if op_id < tid else (tid, op_id)
                 edges.append(GraphEdge(

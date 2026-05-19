@@ -23,6 +23,8 @@ from indexcalc.core.tensor import (
 )
 from indexcalc.core.deriv import PartialDeriv
 from indexcalc.core.variation import ZeroTensor
+from indexcalc.core.scalar_function import ScalarFunction
+from indexcalc.adm import TimeDeriv
 from indexcalc.core.simplify import rename_index
 from indexcalc.core.generator import Generator
 
@@ -273,6 +275,10 @@ def _collect_index_names(expr: TensorExpr) -> set[str]:
         return _collect_index_names(expr.expr)
     if isinstance(expr, PartialDeriv):
         return _collect_index_names(expr.expr) | {expr.deriv_index.name}
+    if isinstance(expr, TimeDeriv):
+        return _collect_index_names(expr.expr)
+    if isinstance(expr, ScalarFunction):
+        return _collect_index_names(expr.arg)
     raise TypeError(f"_collect_index_names: unsupported {type(expr).__name__}")
 
 

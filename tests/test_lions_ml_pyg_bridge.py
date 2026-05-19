@@ -40,7 +40,8 @@ def test_h_norm_squared_data_shape():
     g = _h_norm_graph()
     d = encoded_to_pyg_data(g)
     assert d.num_nodes == 2
-    assert d.x.shape == (2, 7)
+    # 4 base (kind, name, rank, statistics) + len(GROUP_ORDER)=5 rep ids
+    assert d.x.shape == (2, 9)
     assert d.x.dtype == torch.long
     assert d.edge_index.shape == (2, 2), "1 contraction edge → 2 directed"
     assert d.edge_type.shape == (2,)
@@ -53,8 +54,19 @@ def test_label_vector_alignment():
     d = encoded_to_pyg_data(g)
     assert d.y.shape == (1, len(GROUP_ORDER))
     assert d.y_mask.shape == (1, len(GROUP_ORDER))
-    assert d.y.tolist() == [[1.0, 1.0, 1.0]]
-    assert d.y_mask.tolist() == [[1.0, 1.0, 1.0]]
+    # _h_norm_graph declares all v1 SM-lite groups True; v2 NR groups
+    # (O(3)/SO(3)) are absent → y_mask = 0 for those slots.
+    su2_idx = GROUP_ORDER.index("SU(2)")
+    u1y_idx = GROUP_ORDER.index("U(1)_Y")
+    lorz_idx = GROUP_ORDER.index("Lorentz")
+    declared = {su2_idx, u1y_idx, lorz_idx}
+    y = d.y[0].tolist()
+    ym = d.y_mask[0].tolist()
+    for i in range(len(GROUP_ORDER)):
+        if i in declared:
+            assert y[i] == 1.0 and ym[i] == 1.0
+        else:
+            assert ym[i] == 0.0
 
 
 def test_missing_group_masked():
@@ -62,9 +74,14 @@ def test_missing_group_masked():
     g = _h_norm_graph()
     g.labels = {"SU(2)": True}  # only SU(2) declared
     d = encoded_to_pyg_data(g)
-    # GROUP_ORDER = ("SU(2)", "U(1)_Y", "Lorentz")
-    assert d.y.tolist() == [[1.0, 0.0, 0.0]]
-    assert d.y_mask.tolist() == [[1.0, 0.0, 0.0]]
+    su2_idx = GROUP_ORDER.index("SU(2)")
+    y = d.y[0].tolist()
+    ym = d.y_mask[0].tolist()
+    for i in range(len(GROUP_ORDER)):
+        if i == su2_idx:
+            assert y[i] == 1.0 and ym[i] == 1.0
+        else:
+            assert ym[i] == 0.0
 
 
 def test_scalar_carries_real_imag():
