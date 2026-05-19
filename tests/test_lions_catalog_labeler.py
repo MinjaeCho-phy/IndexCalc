@@ -170,6 +170,45 @@ def test_epsilon_n3_in_fund_space_only_matches_su3():
     assert positives == {"SU(3)"}, positives
 
 
+def test_field_rep_sig_filters_fund_pairs():
+    """L = (φ†_i φ^i)² — fund × antifund Einstein contraction, no invariant
+    tensor. Rep-sig narrows U/SU(2) only; SO/O are dropped because their
+    supported_reps doesn't include 'fund'/'antifund'."""
+    from indexcalc.core.tensor import TensorProduct
+    fund = IndexSpace("t_su2_fund", dim=2, indices="ij")
+    phi_u = Tensor("phi", [fund.upper("i")],
+                   reps={"SU(2)": "fund", "U(2)": "fund"})
+    phi_d = Tensor("phidag", [fund.lower("i")],
+                   reps={"SU(2)": "antifund", "U(2)": "antifund"})
+    expr = phi_d * phi_u  # |φ|²
+    labels = label_lagrangian(expr, primary_entry=get("SU(2)"))
+    positives = {k for k, v in labels.items() if v}
+    # SU(2)/U(2) carry the fund pair; nothing else does.
+    assert positives == {"SU(2)", "U(2)"}, positives
+
+
+def test_lorentz_vector_field_filters_to_lorentz_family():
+    """L = F^μ F_μ on a Lorentz spacetime field — Lorentz/Poincaré only
+    (η is implicit via Einstein; expr's rep sig pins the family)."""
+    st = IndexSpace("t_lst", dim=4, indices="μνρ", metric="eta")
+    A_u = Tensor("F1", [st.upper("μ")], reps={"Lorentz": "vector"})
+    A_d = Tensor("F1", [st.lower("μ")], reps={"Lorentz": "vector"})
+    expr = A_u * A_d
+    labels = label_lagrangian(expr, primary_entry=get("Lorentz"))
+    positives = {k for k, v in labels.items() if v}
+    assert positives == {"Lorentz", "Poincare"}, positives
+
+
+def test_scalar_field_still_matches_everything():
+    """Sanity: a pure scalar (no reps, no invariant tensor) still
+    saturates every catalog entry — the user's L=φ² intent."""
+    fund = IndexSpace("t_dummy", dim=1, indices="·")
+    phi = Tensor("phi", [], reps={})
+    expr = phi * Tensor("phi", [], reps={})
+    labels = label_lagrangian(expr, primary_entry=get("U(1)"))
+    assert all(labels.values()), f"non-trivial: {labels}"
+
+
 def test_eta_only_matches_lorentz_and_poincare():
     st = IndexSpace("t_lorentz_st", dim=4, indices="μνρσ", metric="eta")
     eta = Tensor(
