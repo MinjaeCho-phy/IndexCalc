@@ -56,7 +56,8 @@ def test_signature_picks_delta_dim_metric():
     F = _field("Fi", space)
     expr = _delta(space) * F * F
     sig = collect_tensor_signature(expr)
-    assert sig == {("delta", 3, "delta")}
+    # (name, dim, metric, slot_count) — δ is 2-slot.
+    assert sig == {("delta", 3, "delta", 2)}
 
 
 def test_signature_normalizes_eta_on_delta_space():
@@ -67,7 +68,44 @@ def test_signature_normalizes_eta_on_delta_space():
         symmetric_pairs=[(0, 1)], reps={},
     )
     sig = collect_tensor_signature(spurious_eta)
-    assert sig == {("delta", 3, "delta")}
+    assert sig == {("delta", 3, "delta", 2)}
+
+
+def test_epsilon_slot_count_in_signature():
+    """ε's slot count is tracked: SU(2) 2-slot vs SU(3) 3-slot are
+    distinguishable even when they sit on the same IndexSpace dim."""
+    space = _vec_space(3)  # dim=3 vec space (orthogonal metric)
+    eps2 = Tensor(
+        "epsilon",
+        [space.lower("i"), space.lower("j")],
+        antisymmetric_pairs=[(0, 1)], reps={},
+    )
+    eps3 = Tensor(
+        "epsilon",
+        [space.lower("i"), space.lower("j"), space.lower("k")],
+        antisymmetric_pairs=[(0, 1), (0, 2), (1, 2)], reps={},
+    )
+    assert collect_tensor_signature(eps2) == {("epsilon", 3, "delta", 2)}
+    assert collect_tensor_signature(eps3) == {("epsilon", 3, "delta", 3)}
+
+
+def test_two_slot_epsilon_on_dim3_matches_no_catalog_entry():
+    """The OOD-eval quirk: ε_{ij} on a dim=3 IndexSpace has no catalog
+    home — SO(3)/SU(3) want 3-slot ε, SO(2)/SU(2) want dim=2."""
+    space = _vec_space(3)
+    A = _field("Ai", space)
+    B = _field("Bj", space)
+    eps2 = Tensor(
+        "epsilon",
+        [space.lower("i"), space.lower("j")],
+        antisymmetric_pairs=[(0, 1)], reps={},
+    )
+    expr = eps2 * A * B
+    # Primary stays True (it's always set), but no other catalog entry
+    # accepts the (epsilon, dim=3, slot=2) shape.
+    labels = label_lagrangian(expr, primary_entry=get("SO(3)"))
+    positives = {k for k, v in labels.items() if v}
+    assert positives == {"SO(3)"}, positives
 
 
 # ─── Multi-positive labels ───────────────────────────────

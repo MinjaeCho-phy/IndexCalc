@@ -61,7 +61,13 @@ def collect_tensor_signature(expr: TensorExpr) -> set[tuple[str, int, str]]:
                 name = e.name
                 if name == "eta" and sp.metric == "delta":
                     name = "delta"
-                sig.add((name, sp.dim, sp.metric))
+                # M5.B.3: slot count matters for ε (SU(N)'s ε is N-slot,
+                # SO(N)'s ε is N-slot, Lorentz ε_μνρσ is 4-slot). The OOD
+                # eval surfaced cases where the enumerator emits a 2-slot
+                # ε on a dim=3 IndexSpace — the structural label was wrong
+                # before this field was tracked.
+                slot_count = len(e.indices)
+                sig.add((name, sp.dim, sp.metric, slot_count))
         elif isinstance(e, (TensorProduct, TensorSum)):
             visit(e.left); visit(e.right)
         elif isinstance(e, ScalarMul):
@@ -82,33 +88,38 @@ def collect_tensor_signature(expr: TensorExpr) -> set[tuple[str, int, str]]:
 
 
 def _entry_compatible_with_sig(
-    entry: CatalogEntry, sig: set[tuple[str, int, str]],
+    entry: CatalogEntry, sig: set[tuple[str, int, str, int]],
 ) -> bool:
     """Is every tensor in ``sig`` consistent with ``entry``?
 
     All-or-nothing: a single foreign tensor disqualifies the entry.
     """
-    for (name, dim, metric) in sig:
+    for (name, dim, metric, slot_count) in sig:
         if name not in entry.invariants:
             return False
-        # Family-specific dim / metric checks.
+        # Family-specific dim / metric / slot-count checks.
         if entry.family == "orthogonal":
             if metric != "delta" or dim != entry.N:
                 return False
+            # SO(N)'s only ε is the N-slot Levi-Civita; O(N) has no ε.
+            if name == "epsilon" and slot_count != entry.N:
+                return False
         elif entry.family == "unitary":
-            # ε on fund space only; metric=="" for fund.
-            # δ on fund isn't in entry.invariants for unitary, so name match
-            # above already filters δ out for U/SU.
             if dim != entry.N:
                 return False
-            if name == "epsilon" and metric != "":
-                return False
+            if name == "epsilon":
+                if metric != "":
+                    return False
+                # SU(N)'s ε is N-slot on fund space.
+                if slot_count != entry.N:
+                    return False
         elif entry.family in ("lorentz", "poincare"):
             if metric != "eta" or dim != 4:
                 return False
+            # Lorentz ε_{μνρσ} is 4-slot.
+            if name == "epsilon" and slot_count != 4:
+                return False
         elif entry.family == "abelian":
-            # U(1) has no tensor invariants → name not in entry.invariants
-            # for any tensor, so we never get here when sig is non-empty.
             return False
     return True
 
