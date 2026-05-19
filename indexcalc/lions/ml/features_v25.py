@@ -53,6 +53,15 @@ PROP_STATISTICS = {"unknown": 0, "bosonic": 1, "fermionic": 2}
 PROP_ANTISYM = {"unknown": 0, "none": 1, "has_antisym": 2}
 
 
+# ─── M4: IndexSpace primary metric vocab ─────────────────
+#
+# Lets the model see whether a node's indices live in an orthogonal
+# (metric="delta"), Lorentz-like (metric="eta"), or unitary fund
+# (metric="") space. Crucial for separating SU(N) ε from SO(N) ε.
+
+PRIMARY_METRIC = {"unknown": 0, "none": 1, "delta": 2, "eta": 3}
+
+
 # ─── Helpers ─────────────────────────────────────────────
 
 
@@ -63,12 +72,17 @@ def _lookup(table, token: str) -> int:
 def node_feature_ids_v25(
     kind: str, name: str, rank: int, statistics: str,
     stats_hint: str = "unknown", antisym_hint: str = "unknown",
+    primary_dim: int = 0, primary_metric: str = "unknown",
 ) -> list[int]:
     """Return a fixed-length int list for one node.
 
-    Layout (length 6): [kind, name, rank, statistics, stats_hint, antisym_hint].
-    The reps slot used in v1.x is dropped — v2.5 fields are anonymized so
-    rep labels are not a stable signal across catalog entries.
+    Layout (length 8):
+      [kind, name, rank, statistics, stats_hint, antisym_hint,
+       primary_dim, primary_metric_id].
+
+    ``primary_dim`` is the IndexSpace dimension of the node's first
+    index (0 if no indices). ``primary_metric`` is the metric label of
+    that same space — "delta"/"eta"/"" → mapped to ``PRIMARY_METRIC``.
     """
     return [
         _lookup(NODE_KIND, kind),
@@ -77,6 +91,8 @@ def node_feature_ids_v25(
         _lookup(STATISTICS, statistics),
         _lookup(PROP_STATISTICS, stats_hint),
         _lookup(PROP_ANTISYM, antisym_hint),
+        int(primary_dim),
+        _lookup(PRIMARY_METRIC, primary_metric if primary_metric else "none"),
     ]
 
 

@@ -45,6 +45,10 @@ class GraphNode:
     rank: int
     reps: dict[str, str]
     statistics: str
+    # M4: per-index (dim, metric) tuples. Empty for nodes that carry no
+    # indices (TimeDeriv operator, ScalarFunction operator, scalar fields).
+    # Optional — v1.x consumers that ignore this field stay unaffected.
+    index_spaces: tuple = ()
 
 
 @dataclass
@@ -105,9 +109,11 @@ def graph_encode(expr: TensorExpr) -> Optional[EncodedGraph]:
 
     def add_tensor(t: Tensor, term_id: int) -> int:
         kind = "field" if t.reps else "invariant"
+        idx_info = tuple((idx.space.dim, idx.space.metric) for idx in t.indices)
         nid = add_node(GraphNode(
             kind=kind, name=t.name, rank=len(t.indices),
             reps=dict(t.reps), statistics=t.statistics,
+            index_spaces=idx_info,
         ), term_id)
         for idx in t.indices:
             index_occ[idx.name].append((nid, idx.position, idx.space.name))
@@ -143,6 +149,8 @@ def graph_encode(expr: TensorExpr) -> Optional[EncodedGraph]:
             op_id = add_node(GraphNode(
                 kind="operator", name="partial", rank=1,
                 reps={}, statistics="bosonic",
+                index_spaces=((e.deriv_index.space.dim,
+                               e.deriv_index.space.metric),),
             ), term_id)
             index_occ[e.deriv_index.name].append(
                 (op_id, e.deriv_index.position, e.deriv_index.space.name),

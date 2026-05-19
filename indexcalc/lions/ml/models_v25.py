@@ -23,7 +23,7 @@ from torch_geometric.nn import RGCNConv, global_mean_pool
 
 from indexcalc.lions.ml.features_v25 import (
     NODE_KIND, NODE_NAME, STATISTICS, PROP_STATISTICS, PROP_ANTISYM,
-    LABEL_ORDER, num_relations,
+    PRIMARY_METRIC, LABEL_ORDER, num_relations,
 )
 
 
@@ -70,6 +70,7 @@ class GroupPrototypeClassifier(nn.Module):
         v_stat = _vsize(STATISTICS)
         v_psh = _vsize(PROP_STATISTICS)
         v_pah = _vsize(PROP_ANTISYM)
+        v_metric = _vsize(PRIMARY_METRIC)
 
         emb = hidden_dim // 4
         half = max(1, emb // 2)
@@ -78,8 +79,10 @@ class GroupPrototypeClassifier(nn.Module):
         self.emb_stat = nn.Embedding(v_stat, half)
         self.emb_psh = nn.Embedding(v_psh, half)
         self.emb_pah = nn.Embedding(v_pah, half)
+        self.emb_metric = nn.Embedding(v_metric, half)  # M4: index-space metric
 
-        node_in_dim = emb * 2 + half * 3 + 1   # +1 for rank scalar
+        # M4: rank scalar + primary_dim scalar (both normalized to ~[0,1]).
+        node_in_dim = emb * 2 + half * 4 + 2
         self.node_proj = nn.Linear(node_in_dim, hidden_dim)
 
         self.convs = nn.ModuleList([
@@ -98,14 +101,19 @@ class GroupPrototypeClassifier(nn.Module):
     # ── encoding ────────────────────────────────────────
 
     def encode_nodes(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [N, 6] long → [kind, name, rank, statistics, stats_hint, antisym_hint]
+        # x: [N, 8] long
+        # [kind, name, rank, statistics, stats_hint, antisym_hint,
+        #  primary_dim, primary_metric]
         kind = self.emb_kind(x[:, 0])
         name = self.emb_name(x[:, 1])
         rank = x[:, 2].float().unsqueeze(-1) / 4.0
         stat = self.emb_stat(x[:, 3])
         psh = self.emb_psh(x[:, 4])
         pah = self.emb_pah(x[:, 5])
-        h = torch.cat([kind, name, rank, stat, psh, pah], dim=-1)
+        primary_dim = x[:, 6].float().unsqueeze(-1) / 5.0   # /max-N in catalog
+        metric = self.emb_metric(x[:, 7])
+        h = torch.cat([kind, name, rank, stat, psh, pah,
+                       primary_dim, metric], dim=-1)
         return self.node_proj(h)
 
     # ── forward ────────────────────────────────────────

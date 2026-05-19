@@ -68,10 +68,16 @@ def _encode_to_pyg(g: EncodedGraph, hints: dict, labels: dict,
     for n in g.nodes:
         # Property hints attach by field name; invariants/operators get "unknown".
         h = hints.get(n.name, {})
+        # M4: pull primary (dim, metric) from the GraphNode's index_spaces.
+        if n.index_spaces:
+            primary_dim, primary_metric = n.index_spaces[0]
+        else:
+            primary_dim, primary_metric = 0, "unknown"
         feats = node_feature_ids_v25(
             n.kind, n.name, n.rank, n.statistics,
             stats_hint=h.get("stats_hint", "unknown"),
             antisym_hint=h.get("antisym_hint", "unknown"),
+            primary_dim=primary_dim, primary_metric=primary_metric,
         )
         if field_token_remap is not None:
             # Remap the name slot (index 1) through the rename perm.
