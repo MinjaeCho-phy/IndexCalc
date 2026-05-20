@@ -36,8 +36,9 @@ from indexcalc.lions.catalog import CATALOG, CatalogEntry
 # - "omega" + metric=""        → symplectic (Sp — antisym form, metric-less space)
 # - "eta"   + metric="eta"   → lorentz/poincare
 # - "eta_conf" + metric="conf" → conformal SO(d,2) (symmetric, indefinite)
+# - "eta_dd" + metric="dd"   → O(D,D) T-duality (symmetric, split signature)
 # - "gamma" + metric="eta"   → lorentz/poincare (Dirac γ^μ)
-INVARIANT_TENSORS = ("delta", "epsilon", "omega", "eta", "eta_conf", "gamma")
+INVARIANT_TENSORS = ("delta", "epsilon", "omega", "eta", "eta_conf", "eta_dd", "gamma")
 
 
 # ─── Tensor signature collection ────────────────────────
@@ -67,6 +68,9 @@ def collect_tensor_signature(expr: TensorExpr) -> set[tuple[str, int, str]]:
                 # Same quirk on a conformal (metric="conf") space → η^conf.
                 elif name == "eta" and sp.metric == "conf":
                     name = "eta_conf"
+                # Same quirk on an O(D,D) (metric="dd") space → η^dd.
+                elif name == "eta" and sp.metric == "dd":
+                    name = "eta_dd"
                 # M5.B.3: slot count matters for ε (SU(N)'s ε is N-slot,
                 # SO(N)'s ε is N-slot, Lorentz ε_μνρσ is 4-slot). The OOD
                 # eval surfaced cases where the enumerator emits a 2-slot
@@ -206,6 +210,8 @@ def _owned_space_signature(entry: CatalogEntry) -> tuple[int, str] | None:
         return (2 * entry.N, "")        # 2N-dim vector, metric-less
     if fam == "conformal":
         return (entry.N + 2, "conf")    # SO(d,2): (d+2)-dim embedding space
+    if fam == "split_orthogonal":
+        return (2 * entry.N, "dd")      # O(D,D): 2D-dim doubled space
     if fam in ("lorentz", "poincare"):
         return (4, "eta")
     raise ValueError(f"unknown family {entry.family!r} in {entry!r}")
@@ -242,6 +248,10 @@ def _entry_compatible_with_sig(
         elif entry.family == "conformal":
             # ε on SO(d,2) is the (d+2)-slot Levi-Civita of the embedding space.
             if name == "epsilon" and slot_count != entry.N + 2:
+                return False
+        elif entry.family == "split_orthogonal":
+            # η^dd is the symmetric 2-index O(D,D) metric (no ε on this space).
+            if name == "eta_dd" and slot_count != 2:
                 return False
         elif entry.family in ("lorentz", "poincare"):
             if name == "epsilon" and slot_count != 4:

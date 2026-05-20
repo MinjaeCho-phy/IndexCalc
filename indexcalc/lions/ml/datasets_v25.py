@@ -2,8 +2,9 @@
 
 Reads ``data/v2-5-catalog/{train,val,test}.json`` and serves PyG ``Data``
 objects with:
-- 19-bit label vector (catalog order, all bits valid → no mask needed).
-- Node features = ``node_feature_ids_v25`` (6 ints per node).
+- Label vector over the full catalog (catalog order, all bits valid → no
+  mask needed).
+- Node features = ``node_feature_ids_v25`` (10 ints per node).
 - Optional random rename augment: at ``__getitem__`` time, F1..F8 token
   IDs are remapped through a fresh permutation so the model can't latch
   onto a fixed slot↔name correspondence.
@@ -69,11 +70,15 @@ def _encode_to_pyg(g: EncodedGraph, hints: dict, labels: dict,
     for n in g.nodes:
         # Property hints attach by field name; invariants/operators get "unknown".
         h = hints.get(n.name, {})
-        # M4: pull primary (dim, metric) from the GraphNode's index_spaces.
-        if n.index_spaces:
-            primary_dim, primary_metric = n.index_spaces[0]
-        else:
-            primary_dim, primary_metric = 0, "unknown"
+        # M4 + v3.3: pull the node's *distinct* index spaces (dim, metric).
+        # ``index_spaces`` is per-slot, so dedupe + sort canonically — this
+        # makes the (primary, secondary) assignment order-invariant (a field
+        # ψ^{iα} encodes the same whether the i or α slot comes first). The
+        # secondary slot exposes a multi-index field's second sector, which
+        # the M4 "first slot only" path discarded (v3.3 Sp false-positive).
+        spaces = sorted(set(n.index_spaces))
+        primary_dim, primary_metric = spaces[0] if spaces else (0, "unknown")
+        secondary_dim, secondary_metric = spaces[1] if len(spaces) > 1 else (0, "unknown")
         # M5.AN: decide kind from the node's name rather than its reps
         # so user input with empty/dummy reps still classifies as a field.
         # ``n.kind`` from graph_encode stays the trusted source for
@@ -88,6 +93,7 @@ def _encode_to_pyg(g: EncodedGraph, hints: dict, labels: dict,
             stats_hint=h.get("stats_hint", "unknown"),
             antisym_hint=h.get("antisym_hint", "unknown"),
             primary_dim=primary_dim, primary_metric=primary_metric,
+            secondary_dim=secondary_dim, secondary_metric=secondary_metric,
         )
         if field_token_remap is not None:
             # Remap the name slot (index 1) through the rename perm.

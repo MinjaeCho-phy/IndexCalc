@@ -19,8 +19,8 @@ from indexcalc.lions.catalog import (
 # ─── Shape ──────────────────────────────────────────────
 
 
-def test_catalog_size_is_26():
-    assert len(CATALOG) == 26
+def test_catalog_size_is_29():
+    assert len(CATALOG) == 29
 
 
 def test_labels_are_unique():

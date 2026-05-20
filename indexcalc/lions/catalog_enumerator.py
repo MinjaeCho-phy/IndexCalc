@@ -237,6 +237,42 @@ def _setup_conformal(entry: CatalogEntry, *, prefix: str, n_fields: int) -> Cata
     return CatalogSetup(entry, spec, space, reg, invariants)
 
 
+def _setup_odd(entry: CatalogEntry, *, prefix: str, n_fields: int) -> CatalogSetup:
+    """O(D,D) T-duality: vector fields on the 2D-dim doubled space with the
+    indefinite ``dd`` metric + symmetric η^dd. No ε (O, not SO).
+
+    Mirrors ``_setup_conformal`` (η^dd is symmetric like η^conf/δ) with a
+    distinct metric name so the labeler separates it from Euclidean SO(2D),
+    Sp(2D), and conformal SO(2D−2,2). The like-position auto-insert emits a
+    tensor named "eta" on the dd space; ``collect_tensor_signature``
+    normalizes that to "eta_dd".
+    """
+    spec = build_groupspec(entry, prefix=prefix)
+    label = entry.label  # "O(4,4)"
+    doubled_dim = 2 * entry.N
+    space = IndexSpace(
+        f"{prefix}{label.lower().replace('(', '_').replace(')', '').replace(',', '_')}_vec",
+        dim=doubled_dim, indices="ABCDEFGHIJKL", metric="dd",
+    )
+    reg = FieldRegistry()
+    for i in range(n_fields):
+        reg.add(FieldSpec(
+            name=f"F{i+1}",
+            slots=(SlotSpec(space, "upper"),),
+            reps={label: "vector"},
+            mass_dim=1.0, statistics="bosonic",
+        ))
+
+    invariants: list[InvariantTensorSpec] = []
+    if "eta_dd" in entry.invariants:
+        invariants.append(InvariantTensorSpec(
+            name="eta_dd",
+            slots=(SlotSpec(space, "lower"), SlotSpec(space, "lower")),
+            symmetric_pairs=((0, 1),),
+        ))
+    return CatalogSetup(entry, spec, space, reg, invariants)
+
+
 def _setup_lorentz_like(entry: CatalogEntry, *, prefix: str, n_fields: int) -> CatalogSetup:
     """Lorentz / Poincaré: D=4 spacetime + Dirac + Weyl. First round = vector
     fields only (spinor enumeration deferred — requires Fermi parity care
@@ -292,6 +328,8 @@ def setup_for_entry(
         return _setup_symplectic(entry, prefix=prefix, n_fields=n_fields)
     if family == "conformal":
         return _setup_conformal(entry, prefix=prefix, n_fields=n_fields)
+    if family == "split_orthogonal":
+        return _setup_odd(entry, prefix=prefix, n_fields=n_fields)
     if family in ("lorentz", "poincare"):
         return _setup_lorentz_like(entry, prefix=prefix, n_fields=n_fields)
     raise ValueError(f"unknown family {family!r}")

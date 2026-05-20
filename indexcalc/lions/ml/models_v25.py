@@ -92,8 +92,9 @@ class GroupPrototypeClassifier(nn.Module):
         self.register_buffer("_dim_lut", lut)
         self._max_dim = max_dim
 
-        # rank scalar (+1) + 5 half-embeddings (stat, psh, pah, metric, pdim).
-        node_in_dim = emb * 2 + half * 5 + 1
+        # rank scalar (+1) + 7 half-embeddings (stat, psh, pah, metric, pdim,
+        # and v3.3 secondary metric + secondary pdim for multi-index fields).
+        node_in_dim = emb * 2 + half * 7 + 1
         self.node_proj = nn.Linear(node_in_dim, hidden_dim)
 
         self.convs = nn.ModuleList([
@@ -112,9 +113,9 @@ class GroupPrototypeClassifier(nn.Module):
     # ── encoding ────────────────────────────────────────
 
     def encode_nodes(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [N, 8] long
+        # x: [N, 10] long
         # [kind, name, rank, statistics, stats_hint, antisym_hint,
-        #  primary_dim, primary_metric]
+        #  primary_dim, primary_metric, secondary_dim, secondary_metric]
         kind = self.emb_kind(x[:, 0])
         name = self.emb_name(x[:, 1])
         rank = x[:, 2].float().unsqueeze(-1) / 4.0
@@ -126,8 +127,16 @@ class GroupPrototypeClassifier(nn.Module):
         dim_idx = self._dim_lut[x[:, 6].long().clamp(0, self._max_dim)]
         primary_dim = self.emb_pdim(dim_idx)
         metric = self.emb_metric(x[:, 7])
+        # v3.3: second distinct index space of a multi-index field (ψ^{iα}
+        # charged under two groups). Reuses the dim/metric tables — a sector's
+        # identity is its (dim, metric), slot-independent; (0,"unknown") when
+        # the node is single-sector. Without this the model only saw the first
+        # sector and confused a dim-3 SU(3) index with a dim-8 Sp one.
+        dim_idx2 = self._dim_lut[x[:, 8].long().clamp(0, self._max_dim)]
+        secondary_dim = self.emb_pdim(dim_idx2)
+        metric2 = self.emb_metric(x[:, 9])
         h = torch.cat([kind, name, rank, stat, psh, pah,
-                       primary_dim, metric], dim=-1)
+                       primary_dim, metric, secondary_dim, metric2], dim=-1)
         return self.node_proj(h)
 
     # ── forward ────────────────────────────────────────

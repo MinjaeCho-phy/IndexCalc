@@ -237,6 +237,38 @@ def standard_conformal_invariants(d: int) -> list[InvariantTensor]:
     ]
 
 
+def standard_o_dd_invariants(D: int) -> list[InvariantTensor]:
+    """T-duality group $O(D,D)$ in the doubled / embedding-space formalism.
+
+    The continuous duality group of NS-NS string theory on a $D$-torus
+    acts on a $2D$-dimensional doubled space preserving a symmetric
+    $O(D,D)$ metric $\\eta^{\\mathrm{dd}}_{MN}$ of split signature $(D,D)$
+    (the off-diagonal $\\eta=\\bigl(\\begin{smallmatrix}0&1\\\\1&0\\end{smallmatrix}\\bigr)$).
+    Like the conformal and Lorentz cases, the indefinite signature does not
+    change the IR contraction structure (a symmetric 2-index invariant), so
+    this mirrors ``standard_so_n_invariants`` *without* the Levi-Civita —
+    $O(D,D)$ (the full T-duality group, including orientation-reversing
+    $\\det=-1$ elements) carries only the metric, like $O(N)$. A distinct
+    tensor/metric name separates it from Euclidean $\\delta$, conformal
+    $\\eta^{\\mathrm{conf}}$, and symplectic $\\Omega$ at equal dimension.
+
+    Parameters
+    ----------
+    D : int
+        Number of doubled dimensions; the group is $O(D,D)$ acting on the
+        $2D$-dim doubled space.
+    """
+    g = f"O({D},{D})"
+    return [
+        InvariantTensor(
+            "eta_dd", g, ("vector_lower", "vector_lower"), "symmetric"
+        ),
+        InvariantTensor(
+            "eta_dd_mixed", g, ("vector_upper", "vector_lower"), None
+        ),
+    ]
+
+
 def standard_so_n_invariants(N: int) -> list[InvariantTensor]:
     """$SO(N)$ vector rep — $O(N)$의 invariants + $\\epsilon_{i_1\\cdots i_N}$.
 

@@ -112,13 +112,13 @@ def test_two_slot_epsilon_on_dim3_matches_no_catalog_entry():
 
 
 def test_scalar_matches_every_entry():
-    """User's 'L = φ²' case — bare singlet matches all 26 catalog entries
+    """User's 'L = φ²' case — bare singlet matches all 29 catalog entries
     (an index-less scalar is a singlet under every group)."""
     space = _vec_space(3)
     Phi = Tensor("Phi", [], reps={})
     labels = label_lagrangian(Phi, primary_entry=get("U(1)"))
     assert all(labels.values()), f"non-trivial labels: {labels}"
-    assert len(labels) == 26
+    assert len(labels) == 29
 
 
 def test_delta_n3_only_matches_o3_and_so3():

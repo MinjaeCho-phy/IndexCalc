@@ -40,7 +40,7 @@ NODE_NAME = {
     "F1": 1, "F2": 2, "F3": 3, "F4": 4, "F5": 5, "F6": 6, "F7": 7, "F8": 8,
     # invariants
     "eta": 10, "delta": 11, "gamma": 12, "epsilon": 13, "omega": 14,
-    "eta_conf": 15,
+    "eta_conf": 15, "eta_dd": 16,
     # operators
     "partial": 20, "TimeDeriv": 21, "ScalarFunction": 22,
 }
@@ -52,7 +52,7 @@ NODE_NAME = {
 # correctly.
 
 INVARIANT_TENSOR_NAMES = frozenset({
-    "eta", "delta", "gamma", "epsilon", "omega", "eta_conf",
+    "eta", "delta", "gamma", "epsilon", "omega", "eta_conf", "eta_dd",
     # v1.x spinor projectors / Lorentz invariants — included for legacy
     # compatibility even though v2.5 doesn't enumerate them yet.
     "P_L", "P_R", "gamma5", "Sigma",
@@ -90,7 +90,8 @@ PROP_ANTISYM = {"unknown": 0, "none": 1, "has_antisym": 2}
 # (metric="delta"), Lorentz-like (metric="eta"), or unitary fund
 # (metric="") space. Crucial for separating SU(N) ε from SO(N) ε.
 
-PRIMARY_METRIC = {"unknown": 0, "none": 1, "delta": 2, "eta": 3, "conf": 4}
+PRIMARY_METRIC = {"unknown": 0, "none": 1, "delta": 2, "eta": 3, "conf": 4,
+                  "dd": 5}
 
 
 # ─── v3.1 tuning: discrete primary-dim vocab ─────────────
@@ -114,16 +115,21 @@ def node_feature_ids_v25(
     kind: str, name: str, rank: int, statistics: str,
     stats_hint: str = "unknown", antisym_hint: str = "unknown",
     primary_dim: int = 0, primary_metric: str = "unknown",
+    secondary_dim: int = 0, secondary_metric: str = "unknown",
 ) -> list[int]:
     """Return a fixed-length int list for one node.
 
-    Layout (length 8):
+    Layout (length 10):
       [kind, name, rank, statistics, stats_hint, antisym_hint,
-       primary_dim, primary_metric_id].
+       primary_dim, primary_metric_id, secondary_dim, secondary_metric_id].
 
-    ``primary_dim`` is the IndexSpace dimension of the node's first
-    index (0 if no indices). ``primary_metric`` is the metric label of
-    that same space — "delta"/"eta"/"" → mapped to ``PRIMARY_METRIC``.
+    ``primary_dim``/``primary_metric`` describe the node's first (canonically
+    sorted) index space; ``secondary_dim``/``secondary_metric`` describe its
+    second distinct index space, or (0, "unknown") when the node lives in a
+    single space. The secondary slot is what makes a multi-index field
+    ψ^{iα} — charged under two groups at once — expose *both* sectors' (dim,
+    metric); without it only the first sector was visible and the model could
+    not tell a dim-3 SU(3) internal index from a dim-8 Sp one (v3.3 Sp fix).
     """
     return [
         _lookup(NODE_KIND, kind),
@@ -134,6 +140,8 @@ def node_feature_ids_v25(
         _lookup(PROP_ANTISYM, antisym_hint),
         int(primary_dim),
         _lookup(PRIMARY_METRIC, primary_metric if primary_metric else "none"),
+        int(secondary_dim),
+        _lookup(PRIMARY_METRIC, secondary_metric if secondary_metric else "none"),
     ]
 
 

@@ -5,7 +5,7 @@ re-runs invariance proofs at inference time. Instead it scores a
 Lagrangian against a fixed catalog of (group, N) prototypes and returns
 a ranked top-K. This file defines that catalog.
 
-v3.2 round = 26 entries:
+v3.3 round = 29 entries:
 - U(1)
 - U(N), N=2..5      (4)
 - SU(N), N=2..5     (4)
@@ -13,13 +13,16 @@ v3.2 round = 26 entries:
 - SO(N), N=2..5     (4)
 - Sp(2N), rank N=2..5 → Sp(4),Sp(6),Sp(8),Sp(10)  (4)  [v3.0]
 - SO(d,2) conformal, d=2,3,4 → SO(2,2),SO(3,2),SO(4,2)  (3)  [v3.2]
+- O(D,D) T-duality, D=2,3,4 → O(2,2),O(3,3),O(4,4)  (3)  [v3.3]
 - Lorentz (D=4)
 - Poincaré (D=4)
 
-Sp(2N) added v3.0; conformal SO(d,2) added v3.2 (embedding-space formalism —
-orthogonal vector rep on the (d+2)-dim space with an indefinite metric, like
-Lorentz=SO(1,3)). Majorana (a reality condition, not a Lie group) and
-exceptional E_d: deferred. See ``v3_catalog_expansion.md``.
+Sp(2N) added v3.0; conformal SO(d,2) added v3.2 and O(D,D) added v3.3 (both
+embedding-space formalism — orthogonal vector rep on a higher-dim space with
+an indefinite metric, like Lorentz=SO(1,3)). O(D,D) is the NS-NS T-duality
+group on a D-torus and the prototype seed for the hidden-symmetry track.
+Majorana (a reality condition, not a Lie group) and exceptional E_d:
+deferred. See ``v3_catalog_expansion.md`` / ``v3_3_odd_catalog.md``.
 
 Each entry carries enough metadata for two consumers:
 1. The dataset generator (M2) — pick supported reps and invariant
@@ -110,6 +113,23 @@ def _conformal_entry(d: int) -> CatalogEntry:
     )
 
 
+def _odd_entry(D: int) -> CatalogEntry:
+    """T-duality group O(D,D), embedding/doubled-space formalism on 2D-dim.
+
+    A genuine Lie group handled like the conformal case: orthogonal vector
+    rep on the 2D-dim doubled space with the indefinite split-signature
+    ``dd`` metric. ``N`` stores D; the vector dim is 2D. Carries only the
+    metric (no ε) — like O(N), and matching the full T-duality group O(D,D)
+    (det=±1). Distinguished from Euclidean SO(2D) (δ), Sp(2D) (Ω), and
+    conformal SO(2D−2,2) (η^conf) at equal dimension by the ``dd`` metric.
+    """
+    return CatalogEntry(
+        group_name=f"O({D},{D})", N=D, family="split_orthogonal",
+        supported_reps=("singlet", "vector"),
+        invariants=("eta_dd",),
+    )
+
+
 def _lorentz_entry() -> CatalogEntry:
     return CatalogEntry(
         group_name="Lorentz", N=4, family="lorentz",
@@ -142,10 +162,12 @@ CATALOG: tuple[CatalogEntry, ...] = (
     *(_classical_entry("Sp(2N)", N) for N in (2, 3, 4, 5)),
     # Conformal SO(d,2) v3.2: spacetime d=2,3,4 → embedding dim 4,5,6.
     *(_conformal_entry(d) for d in (2, 3, 4)),
+    # O(D,D) T-duality v3.3: D=2,3,4 → doubled dim 4,6,8.
+    *(_odd_entry(D) for D in (2, 3, 4)),
     _lorentz_entry(),
     _poincare_entry(),
 )
-assert len(CATALOG) == 26, f"expected 26 catalog entries, got {len(CATALOG)}"
+assert len(CATALOG) == 29, f"expected 29 catalog entries, got {len(CATALOG)}"
 
 
 def all_labels() -> list[str]:
@@ -212,6 +234,9 @@ def build_groupspec(entry: CatalogEntry, *, prefix: str = ""):
     if entry.family == "conformal":
         return _build_conformal_spec(entry, prefix=prefix)
 
+    if entry.family == "split_orthogonal":
+        return _build_odd_spec(entry, prefix=prefix)
+
     if entry.family == "lorentz":
         return _build_lorentz_spec(prefix=prefix)
 
@@ -246,6 +271,28 @@ def _build_conformal_spec(entry: CatalogEntry, *, prefix: str = ""):
     dim = emb_dim * (emb_dim - 1) // 2  # SO(d,2): (d+2)(d+1)/2
     g = Group(name, dim=dim, abelian=False)
     g.add_rep("vector", dim=emb_dim)
+    g.add_rep("singlet", dim=1)
+    gen = make_o_n_generator(g, space)
+    return GroupSpec(name=name, group=g, generator=gen, dim=dim)
+
+
+def _build_odd_spec(entry: CatalogEntry, *, prefix: str = ""):
+    """O(D,D) spec — orthogonal vector rep on the 2D-dim doubled space with
+    the indefinite split-signature ``dd`` metric. Generator reuses
+    ``make_o_n_generator`` (δV^M = M^M_N V^N is signature-independent; the
+    metric only enters invariant contractions) — exactly as conformal."""
+    from indexcalc.core.generator import make_o_n_generator
+    from indexcalc.lions.probe import GroupSpec
+
+    name = entry.label  # "O(4,4)"
+    doubled_dim = 2 * entry.N
+    space = IndexSpace(
+        f"{prefix}{name.lower().replace('(', '_').replace(')', '').replace(',', '_')}_vec",
+        dim=doubled_dim, indices="ABCDEFGHIJKL", metric="dd",
+    )
+    dim = doubled_dim * (doubled_dim - 1) // 2  # so(D,D): 2D(2D-1)/2
+    g = Group(name, dim=dim, abelian=False)
+    g.add_rep("vector", dim=doubled_dim)
     g.add_rep("singlet", dim=1)
     gen = make_o_n_generator(g, space)
     return GroupSpec(name=name, group=g, generator=gen, dim=dim)
