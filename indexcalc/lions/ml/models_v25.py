@@ -23,7 +23,7 @@ from torch_geometric.nn import RGCNConv, global_mean_pool
 
 from indexcalc.lions.ml.features_v25 import (
     NODE_KIND, NODE_NAME, STATISTICS, PROP_STATISTICS, PROP_ANTISYM,
-    PRIMARY_METRIC, LABEL_ORDER, num_relations,
+    PRIMARY_METRIC, PRIMARY_DIM_VOCAB, LABEL_ORDER, num_relations,
 )
 
 
@@ -71,6 +71,7 @@ class GroupPrototypeClassifier(nn.Module):
         v_psh = _vsize(PROP_STATISTICS)
         v_pah = _vsize(PROP_ANTISYM)
         v_metric = _vsize(PRIMARY_METRIC)
+        v_pdim = _vsize(PRIMARY_DIM_VOCAB)
 
         emb = hidden_dim // 4
         half = max(1, emb // 2)
@@ -79,10 +80,20 @@ class GroupPrototypeClassifier(nn.Module):
         self.emb_stat = nn.Embedding(v_stat, half)
         self.emb_psh = nn.Embedding(v_psh, half)
         self.emb_pah = nn.Embedding(v_pah, half)
-        self.emb_metric = nn.Embedding(v_metric, half)  # M4: index-space metric
+        self.emb_metric = nn.Embedding(v_metric, half)   # M4: index-space metric
+        self.emb_pdim = nn.Embedding(v_pdim, half)        # v3.1: discrete dim
 
-        # M4: rank scalar + primary_dim scalar (both normalized to ~[0,1]).
-        node_in_dim = emb * 2 + half * 4 + 2
+        # Lookup table raw IndexSpace dim → PRIMARY_DIM_VOCAB index. Buffer so
+        # it rides along with .to(device) / state_dict.
+        max_dim = max(PRIMARY_DIM_VOCAB)
+        lut = torch.zeros(max_dim + 1, dtype=torch.long)
+        for d, i in PRIMARY_DIM_VOCAB.items():
+            lut[d] = i
+        self.register_buffer("_dim_lut", lut)
+        self._max_dim = max_dim
+
+        # rank scalar (+1) + 5 half-embeddings (stat, psh, pah, metric, pdim).
+        node_in_dim = emb * 2 + half * 5 + 1
         self.node_proj = nn.Linear(node_in_dim, hidden_dim)
 
         self.convs = nn.ModuleList([
@@ -110,7 +121,10 @@ class GroupPrototypeClassifier(nn.Module):
         stat = self.emb_stat(x[:, 3])
         psh = self.emb_psh(x[:, 4])
         pah = self.emb_pah(x[:, 5])
-        primary_dim = x[:, 6].float().unsqueeze(-1) / 5.0   # /max-N in catalog
+        # v3.1: discrete dim embedding (raw dim → vocab idx via LUT). Resolves
+        # close high dims (Sp(8) vs Sp(10)) the old /5 scalar conflated.
+        dim_idx = self._dim_lut[x[:, 6].long().clamp(0, self._max_dim)]
+        primary_dim = self.emb_pdim(dim_idx)
         metric = self.emb_metric(x[:, 7])
         h = torch.cat([kind, name, rank, stat, psh, pah,
                        primary_dim, metric], dim=-1)

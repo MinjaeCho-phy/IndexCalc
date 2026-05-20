@@ -92,6 +92,16 @@ PROP_ANTISYM = {"unknown": 0, "none": 1, "has_antisym": 2}
 PRIMARY_METRIC = {"unknown": 0, "none": 1, "delta": 2, "eta": 3}
 
 
+# ─── v3.1 tuning: discrete primary-dim vocab ─────────────
+#
+# Catalog index-space dims: U(1)=1, N∈{2..5} (U/SU/O/SO), Sp dims {4,6,8,10},
+# Lorentz/Poincaré=4. A *discrete* embedding (vs a /5 scalar) lets the model
+# resolve close high dims — Sp(8) (dim 8) vs Sp(10) (dim 10) were confused
+# under the scalar encoding. 0 = no-index / unknown.
+CATALOG_DIMS = (1, 2, 3, 4, 5, 6, 8, 10)
+PRIMARY_DIM_VOCAB = {0: 0, **{d: i + 1 for i, d in enumerate(CATALOG_DIMS)}}
+
+
 # ─── Helpers ─────────────────────────────────────────────
 
 
