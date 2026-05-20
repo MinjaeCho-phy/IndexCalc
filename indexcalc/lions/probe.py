@@ -276,6 +276,8 @@ def classical_group_spec(
 
     Supported:
     - ``"O(N)"``, ``"SO(N)"``: vector + singlet, ``index_space``는 N-dim vector space.
+    - ``"Sp(2N)"``: vector + singlet, ``index_space``는 2N-dim (짝수) vector space
+      with antisymmetric Ω metric. ``N`` 인자는 vector dim (= 2·rank).
     - ``"SU(N)"``, ``"U(N)"``: fund + antifund + singlet, ``index_space``는 fund space
       (N-dim 복소), ``adj_space``는 adj space (dim = N²-1 for SU, N² for U).
     - ``"U(1)"``: charged reps, ``index_space``는 무시 (abelian).
@@ -294,8 +296,24 @@ def classical_group_spec(
     """
     from indexcalc.core.generator import (
         make_o_n_generator, make_su_n_generator, make_u1_generator,
+        make_sp_2n_generator,
     )
     from indexcalc.core.index import IndexSpace as _IS
+
+    if group_name.startswith("Sp("):
+        if index_space is None:
+            raise ValueError(f"{group_name} requires index_space (vector)")
+        if N % 2 != 0:
+            raise ValueError(
+                f"{group_name}: symplectic vector dim must be even, got {N}"
+            )
+        rank = N // 2
+        dim = rank * (N + 1)  # = rank·(2·rank+1)
+        g = Group(group_name, dim=dim, abelian=False)
+        g.add_rep("vector", dim=N)
+        g.add_rep("singlet", dim=1)
+        gen = make_sp_2n_generator(g, index_space)
+        return GroupSpec(name=group_name, group=g, generator=gen, dim=dim)
 
     if group_name.startswith("O(") or group_name.startswith("SO("):
         if index_space is None:
@@ -339,7 +357,7 @@ def classical_group_spec(
 
     raise ValueError(
         f"classical_group_spec: unsupported group {group_name!r}. "
-        f"Supported: O(N), SO(N), U(N), SU(N), U(1)."
+        f"Supported: O(N), SO(N), Sp(2N), U(N), SU(N), U(1)."
     )
 
 

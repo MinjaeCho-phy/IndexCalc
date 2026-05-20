@@ -33,9 +33,10 @@ from indexcalc.lions.catalog import CATALOG, CatalogEntry
 # - "delta" + metric="delta"  → orthogonal
 # - "epsilon" + metric="delta" → orthogonal (SO only)
 # - "epsilon" + metric=""      → unitary (SU only — fund space)
+# - "omega" + metric=""        → symplectic (Sp — antisym form, metric-less space)
 # - "eta"   + metric="eta"   → lorentz/poincare
 # - "gamma" + metric="eta"   → lorentz/poincare (Dirac γ^μ)
-INVARIANT_TENSORS = ("delta", "epsilon", "eta", "gamma")
+INVARIANT_TENSORS = ("delta", "epsilon", "omega", "eta", "gamma")
 
 
 # ─── Tensor signature collection ────────────────────────
@@ -177,40 +178,64 @@ def _entry_compatible_with_rep_sig(
 # ─── Per-entry compatibility ────────────────────────────
 
 
+def _owned_space_signature(entry: CatalogEntry) -> tuple[int, str] | None:
+    """The ``(dim, metric)`` of the index space ``entry``'s group acts on.
+
+    Per-sector labeling (v3.1) judges an entry *only* by the invariant
+    tensors living in this space; tensors in other spaces are singlets to
+    this group and ignored. U(1) (abelian) transforms via charges, not an
+    index space → ``None`` (no owned space; ``rep_sig`` alone gates it).
+
+    Note the deliberate (dim, metric) collision between unitary fund and
+    symplectic vector at equal dimension (e.g. SU(4) and Sp(4) both own
+    ``(4, "")``): the two are separated downstream by the invariant-tensor
+    *name* (ε ∈ SU only, Ω ∈ Sp only) and by ``rep_sig``.
+    """
+    fam = entry.family
+    if fam == "abelian":
+        return None
+    if fam == "unitary":
+        return (entry.N, "")            # fund space, metric-less
+    if fam == "orthogonal":
+        return (entry.N, "delta")
+    if fam == "symplectic":
+        return (2 * entry.N, "")        # 2N-dim vector, metric-less
+    if fam in ("lorentz", "poincare"):
+        return (4, "eta")
+    raise ValueError(f"unknown family {entry.family!r} in {entry!r}")
+
+
 def _entry_compatible_with_sig(
     entry: CatalogEntry, sig: set[tuple[str, int, str, int]],
 ) -> bool:
-    """Is every tensor in ``sig`` consistent with ``entry``?
+    """Per-sector tensor compatibility (v3.1).
 
-    All-or-nothing: a single foreign tensor disqualifies the entry.
+    Only tensors living in the entry's own index space (matched by
+    ``(dim, metric)``) are judged: each must be one of the group's declared
+    invariants, with the right slot count. Tensors in *other* spaces are
+    singlets to this group and ignored — so a multi-sector Lagrangian
+    (δ_ij A^iA^j + Ω_kl B^kB^l, or a single field ψ^{aα}_μ charged under
+    several groups) is correctly compatible with each sector's group.
+    Over-generation is held back by the per-group ``rep_sig`` check.
     """
+    owned = _owned_space_signature(entry)
+    if owned is None:
+        return True  # abelian: no index space; rep_sig gates U(1)
     for (name, dim, metric, slot_count) in sig:
+        if (dim, metric) != owned:
+            continue  # foreign space — singlet to this group, ignore
         if name not in entry.invariants:
             return False
-        # Family-specific dim / metric / slot-count checks.
-        if entry.family == "orthogonal":
-            if metric != "delta" or dim != entry.N:
-                return False
-            # SO(N)'s only ε is the N-slot Levi-Civita; O(N) has no ε.
+        # N-slot Levi-Civita / 2-slot symplectic slot-count checks.
+        if entry.family in ("orthogonal", "unitary"):
             if name == "epsilon" and slot_count != entry.N:
                 return False
-        elif entry.family == "unitary":
-            if dim != entry.N:
+        elif entry.family == "symplectic":
+            if slot_count != 2:
                 return False
-            if name == "epsilon":
-                if metric != "":
-                    return False
-                # SU(N)'s ε is N-slot on fund space.
-                if slot_count != entry.N:
-                    return False
         elif entry.family in ("lorentz", "poincare"):
-            if metric != "eta" or dim != 4:
-                return False
-            # Lorentz ε_{μνρσ} is 4-slot.
             if name == "epsilon" and slot_count != 4:
                 return False
-        elif entry.family == "abelian":
-            return False
     return True
 
 

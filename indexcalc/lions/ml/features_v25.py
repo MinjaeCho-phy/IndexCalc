@@ -5,7 +5,7 @@ Different from v1.x ``features.py``:
   names (Phi, H, L, ...). Field naming bias removed per the v2.5
   redirect — random rename augment applies these slots in a fresh
   permutation each epoch (see ``LionsV25Dataset.__getitem__``).
-- ``LABEL_ORDER`` = ``indexcalc.lions.catalog.all_labels()``, 19 entries.
+- ``LABEL_ORDER`` = ``indexcalc.lions.catalog.all_labels()``, 23 entries (v3.0).
 - Node feature includes 2 extra ints encoding field-property hints
   (statistics, antisym-pair flag). Blank variants set both to "unknown".
 
@@ -26,7 +26,7 @@ from indexcalc.lions.ml.features import (
 # ─── v2.5 catalog label order ─────────────────────────────
 
 
-LABEL_ORDER: tuple[str, ...] = tuple(all_labels())   # 19 entries
+LABEL_ORDER: tuple[str, ...] = tuple(all_labels())   # 23 entries (v3.0: +Sp(4..10))
 
 
 # ─── Anonymized field name vocab ──────────────────────────
@@ -39,7 +39,7 @@ NODE_NAME = {
     # anonymized fields
     "F1": 1, "F2": 2, "F3": 3, "F4": 4, "F5": 5, "F6": 6, "F7": 7, "F8": 8,
     # invariants
-    "eta": 10, "delta": 11, "gamma": 12, "epsilon": 13,
+    "eta": 10, "delta": 11, "gamma": 12, "epsilon": 13, "omega": 14,
     # operators
     "partial": 20, "TimeDeriv": 21, "ScalarFunction": 22,
 }
@@ -51,7 +51,7 @@ NODE_NAME = {
 # correctly.
 
 INVARIANT_TENSOR_NAMES = frozenset({
-    "eta", "delta", "gamma", "epsilon",
+    "eta", "delta", "gamma", "epsilon", "omega",
     # v1.x spinor projectors / Lorentz invariants — included for legacy
     # compatibility even though v2.5 doesn't enumerate them yet.
     "P_L", "P_R", "gamma5", "Sigma",

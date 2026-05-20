@@ -26,6 +26,7 @@ from indexcalc.lions.ml.features_v25 import (
 from indexcalc.lions.ml.features import edge_feature_ids
 from indexcalc.lions.serializer import expr_from_dict, space_from_dict
 from indexcalc.lions.graph import graph_encode, EncodedGraph
+from indexcalc.lions.augment import shuffle_order
 
 _require_torch()
 import torch
@@ -36,8 +37,8 @@ from torch_geometric.data import Batch, Data
 # ─── Row → encoded graph (no torch yet) ──────────────────
 
 
-def _row_to_graph(row: dict, spaces: dict) -> tuple[EncodedGraph, dict, dict]:
-    """Decode one JSON row into (graph, field_property_hints, labels)."""
+def _row_to_graph(row: dict, spaces: dict):
+    """Decode one JSON row into (expr, graph, field_property_hints, labels)."""
     expr = expr_from_dict(row["expr"], spaces)
     g = graph_encode(expr)
     if g is None:
@@ -55,7 +56,7 @@ def _row_to_graph(row: dict, spaces: dict) -> tuple[EncodedGraph, dict, dict]:
                 "has_antisym" if p.get("antisymmetric_pairs") else "none"
             ),
         }
-    return g, hints, row["labels"]
+    return expr, g, hints, row["labels"]
 
 
 # ─── Encode one graph → PyG Data ─────────────────────────
@@ -147,31 +148,37 @@ class LionsV25Dataset(Dataset):
 
     def __init__(self, json_path: Path | str, *,
                  random_rename: bool = False,
+                 order_shuffle: bool = False,
                  rename_seed: int | None = None):
         self.json_path = Path(json_path)
         self.random_rename = random_rename
+        self.order_shuffle = order_shuffle
         self._rng = random.Random(rename_seed)
 
         raw = json.loads(self.json_path.read_text())
         spaces = {nm: space_from_dict(nm, d) for nm, d in raw["spaces"].items()}
 
-        # Pre-decode the (graph, hints, labels) triples. Encoding to PyG
-        # Data happens in __getitem__ so we can refresh the rename perm.
-        self._graphs: list[tuple[EncodedGraph, dict, dict]] = []
+        # Pre-decode (expr, graph, hints, labels). Encoding to PyG Data happens
+        # in __getitem__ so we can refresh the rename perm; the expr is kept so
+        # ``order_shuffle`` can re-encode a fresh term/factor permutation per
+        # epoch (v3.1) — semantically a no-op, augments against order bias.
+        self._graphs: list[tuple[object, EncodedGraph, dict, dict]] = []
         for row in raw["rows"]:
             try:
-                g, hints, labels = _row_to_graph(row, spaces)
+                expr, g, hints, labels = _row_to_graph(row, spaces)
             except (NotImplementedError, ValueError):
                 continue
             if len(g.nodes) == 0:
                 continue
-            self._graphs.append((g, hints, labels))
+            self._graphs.append((expr, g, hints, labels))
 
     def __len__(self) -> int:
         return len(self._graphs)
 
     def __getitem__(self, idx: int) -> Data:
-        g, hints, labels = self._graphs[idx]
+        expr, g, hints, labels = self._graphs[idx]
+        if self.order_shuffle:
+            g = graph_encode(shuffle_order(expr, self._rng))
         remap = None
         if self.random_rename:
             shuffled = list(FIELD_TOKEN_IDS)

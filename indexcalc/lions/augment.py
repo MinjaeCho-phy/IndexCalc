@@ -531,3 +531,60 @@ def enumerate_n3_negatives(
                 continue
             out.append(neg)
     return out
+
+
+# ─── v3.1: expr-level compose + order shuffle ────────────
+
+
+def compose_terms(exprs: list[TensorExpr]) -> TensorExpr:
+    """Sum several monomials into one multi-term Lagrangian.
+
+    Dummy index names are disambiguated across terms (``_disambiguate_indices``)
+    so distinct terms never accidentally share or cross-contract a name. Used
+    to synthesise multi-term training samples (v3.1) — same-symmetry sums
+    (Ω F1F2 + Ω F3F4) and cross-symmetry sums (δ AA + Ω BB). The per-sector
+    labeler unions each term's signature, so the composite's labels are the
+    per-sector intersection-by-construction of what each term admits.
+    """
+    if not exprs:
+        raise ValueError("compose_terms: empty expr list")
+    acc = exprs[0]
+    for nxt in exprs[1:]:
+        acc = TensorSum(acc, _disambiguate_indices(acc, nxt))
+    return acc
+
+
+def _flatten(expr: TensorExpr, node_type) -> list[TensorExpr]:
+    """Flatten a left-nested ``node_type`` (TensorSum/TensorProduct) tree."""
+    if isinstance(expr, node_type):
+        return _flatten(expr.left, node_type) + _flatten(expr.right, node_type)
+    return [expr]
+
+
+def shuffle_order(expr: TensorExpr, rng) -> TensorExpr:
+    """Randomly permute TensorSum term order and TensorProduct factor order.
+
+    Semantically a no-op for the IR — sums and products are commutative and
+    contractions match by index *name*, not position — so labels are
+    preserved. Used as a training augment (v3.1) so the GNN doesn't latch
+    onto term/factor ordering. ``rng`` is a ``random.Random``.
+    """
+    if isinstance(expr, TensorSum):
+        terms = [shuffle_order(t, rng) for t in _flatten(expr, TensorSum)]
+        rng.shuffle(terms)
+        acc = terms[0]
+        for t in terms[1:]:
+            acc = TensorSum(acc, t)
+        return acc
+    if isinstance(expr, TensorProduct):
+        factors = [shuffle_order(f, rng) for f in _flatten(expr, TensorProduct)]
+        rng.shuffle(factors)
+        acc = factors[0]
+        for f in factors[1:]:
+            acc = TensorProduct(acc, f)
+        return acc
+    if isinstance(expr, ScalarMul):
+        return ScalarMul(expr.scalar, shuffle_order(expr.expr, rng))
+    # Tensor / ZeroTensor / PartialDeriv / TimeDeriv / ScalarFunction: leaves
+    # for ordering purposes (catalog v3.1 samples carry no derivatives).
+    return expr

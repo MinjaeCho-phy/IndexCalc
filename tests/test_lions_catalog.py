@@ -19,8 +19,8 @@ from indexcalc.lions.catalog import (
 # ─── Shape ──────────────────────────────────────────────
 
 
-def test_catalog_size_is_19():
-    assert len(CATALOG) == 19
+def test_catalog_size_is_23():
+    assert len(CATALOG) == 23
 
 
 def test_labels_are_unique():
@@ -33,10 +33,20 @@ def test_labels_are_unique():
     ("SU(N)", (2, 3, 4, 5)),
     ("O(N)",  (2, 3, 4, 5)),
     ("SO(N)", (2, 3, 4, 5)),
+    ("Sp(2N)", (2, 3, 4, 5)),
 ])
 def test_each_classical_family_has_4_entries(group_name, expected_Ns):
     matching = [e for e in CATALOG if e.group_name == group_name]
     assert tuple(e.N for e in matching) == expected_Ns
+
+
+def test_sp_labels_use_2n_dimension():
+    """Sp 엔트리는 rank N을 저장하지만 concrete label은 Sp(2N)."""
+    sp = [e for e in CATALOG if e.family == "symplectic"]
+    assert [e.label for e in sp] == ["Sp(4)", "Sp(6)", "Sp(8)", "Sp(10)"]
+    assert get("Sp(4)").N == 2  # rank 2 → dim 4
+    assert "omega" in get("Sp(4)").invariants
+    assert "delta" not in get("Sp(4)").invariants
 
 
 def test_singletons():
@@ -53,8 +63,9 @@ def test_get_lookup():
     assert get("U(3)").N == 3
     assert get("SO(4)").family == "orthogonal"
     assert get("Lorentz").family == "lorentz"
+    assert get("Sp(6)").family == "symplectic"
     with pytest.raises(KeyError):
-        get("Sp(4)")
+        get("Sp(12)")  # rank 6 — out of first round (N=2..5)
 
 
 # ─── Invariant tensor table ─────────────────────────────
@@ -85,6 +96,7 @@ def test_su_n_has_epsilon_u_n_does_not():
     "SU(2)", "SU(3)", "SU(4)", "SU(5)",
     "O(2)", "O(3)", "O(4)", "O(5)",
     "SO(2)", "SO(3)", "SO(4)", "SO(5)",
+    "Sp(4)", "Sp(6)", "Sp(8)", "Sp(10)",
     "Lorentz", "Poincare",
 ])
 def test_build_groupspec_works_for_every_entry(label):
@@ -92,6 +104,14 @@ def test_build_groupspec_works_for_every_entry(label):
     spec = build_groupspec(e, prefix=f"t_{label}_")
     assert spec.name in (label, "Lorentz", "Poincare", "U(1)")
     assert spec.generator is not None
+
+
+def test_sp_groupspec_has_vector_singlet_and_correct_dim():
+    spec = build_groupspec(get("Sp(4)"), prefix="t_")
+    for r in ("singlet", "vector"):
+        assert spec.group.has_rep(r), f"Sp(4) missing rep {r}"
+    assert spec.group.get_rep("vector").dim == 4  # 2·rank
+    assert spec.dim == 10  # Sp(4) = rank·(2·rank+1) = 2·5
 
 
 def test_classical_groupspec_carries_supported_reps():

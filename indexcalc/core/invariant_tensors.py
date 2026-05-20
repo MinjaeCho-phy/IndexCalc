@@ -182,6 +182,31 @@ def standard_o_n_invariants(N: int) -> list[InvariantTensor]:
     ]
 
 
+def standard_sp_2n_invariants(N: int) -> list[InvariantTensor]:
+    """$Sp(2N)$ fundamental rep의 standard invariants — **반대칭** symplectic
+    form $\\Omega_{ij} = -\\Omega_{ji}$ 그리고 mixed identity $\\Omega^i{}_j$.
+
+    $O(N)$의 대칭 $\\delta_{ij}$ 와 대비된다 (``standard_o_n_invariants``).
+    Ω가 반대칭이므로 단일 boson bilinear $\\Omega_{ij}\\phi^i\\phi^j = 0$ 으로
+    사라진다 — 살아남는 invariant는 두 다른 field $\\Omega_{ij}\\phi^i\\chi^j$,
+    Grassmann $\\Omega_{ij}\\psi^i\\psi^j$, 또는 미분 $\\Omega_{ij}\\phi^i\\partial\\phi^j$.
+
+    Parameters
+    ----------
+    N : int
+        symplectic rank. fundamental rep의 차원은 $2N$ (= group의 작용 차원).
+    """
+    g = f"Sp({2 * N})"
+    return [
+        InvariantTensor(
+            "omega", g, ("vector_lower", "vector_lower"), "antisymmetric"
+        ),
+        InvariantTensor(
+            "omega_mixed", g, ("vector_upper", "vector_lower"), None
+        ),
+    ]
+
+
 def standard_so_n_invariants(N: int) -> list[InvariantTensor]:
     """$SO(N)$ vector rep — $O(N)$의 invariants + $\\epsilon_{i_1\\cdots i_N}$.
 

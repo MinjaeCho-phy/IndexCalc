@@ -708,6 +708,55 @@ def make_o_n_generator(
     return gen
 
 
+def make_sp_2n_generator(
+    group: Group,
+    vector_space: IndexSpace,
+    parameter_names: tuple = ("a", "b"),
+    generator_name: str = "M",
+    name: Optional[str] = None,
+) -> Generator:
+    """$Sp(2N)$ Group의 fundamental rep + singlet generator.
+
+    Symplectic fundamental rep은 $2N$-차원 공간 위에서 작용하며 IR-level
+    변환 구조 $\\delta V^i = (M)^i{}_j V^j$ 는 ``lorentz_vector_action`` 의
+    그것과 동일하다 — 그래서 ``make_o_n_generator`` 와 같은 패턴으로 재사용한다.
+
+    $Sp(2N)$과 $O(2N)$의 차이는 *invariant tensor* 단계에서만 드러난다:
+    $O(N)$은 대칭 $\\delta_{ij}$, $Sp(2N)$은 **반대칭** symplectic form
+    $\\Omega_{ij} = -\\Omega_{ji}$ 를 보존한다 (``standard_sp_2n_invariants``).
+    $Sp$ 대수 조건 ($M^T\\Omega + \\Omega M = 0$, 즉 $\\Omega M$ 대칭) 자체는
+    $O(N)$의 δ-bilinear 와 동일하게 oracle(apply_generator+simplify)만으로는
+    완결되지 않으며 ``lions.probe._structural_check`` fallback에 의존한다
+    (``make_o_n_generator`` 의 backend gap 노트 참조). v3+ backend cleanup에서
+    단일 path로 통일.
+
+    Examples
+    --------
+    >>> sp4 = Group("Sp(4)", dim=10, abelian=False)
+    >>> sp4.add_rep("vector", dim=4)
+    >>> sp4.add_rep("singlet", dim=1)
+    >>> vec = IndexSpace("sp4_vec", dim=4, indices="ijklmn", metric="omega")
+    >>> g = make_sp_2n_generator(sp4, vec)
+    >>> g.has_action("vector") and g.has_action("singlet")
+    True
+    """
+    if group.abelian:
+        raise ValueError(
+            f"make_sp_2n_generator requires non-abelian group, got {group.name!r}"
+        )
+    gen = Generator(name or f"M_{group.name}", group)
+    vec_act = lorentz_vector_action(
+        vector_space, parameter_names, generator_name=generator_name,
+    )
+    if group.has_rep("vector"):
+        gen.declare_action("vector", vec_act)
+    if group.has_rep("singlet"):
+        gen.declare_action(
+            "singlet", lambda field: ZeroTensor(field.free_indices),
+        )
+    return gen
+
+
 def make_u1_generator(group: Group, name: Optional[str] = None) -> Generator:
     """U(1) Group에 등록된 모든 charged rep에 대해 자동으로 action을 다는 헬퍼.
 

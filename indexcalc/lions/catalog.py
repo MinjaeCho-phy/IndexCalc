@@ -5,17 +5,18 @@ re-runs invariance proofs at inference time. Instead it scores a
 Lagrangian against a fixed catalog of (group, N) prototypes and returns
 a ranked top-K. This file defines that catalog.
 
-First round = 19 entries:
+v3.0 round = 23 entries:
 - U(1)
 - U(N), N=2..5      (4)
 - SU(N), N=2..5     (4)
 - O(N), N=2..5      (4)
 - SO(N), N=2..5     (4)
+- Sp(2N), rank N=2..5 → Sp(4),Sp(6),Sp(8),Sp(10)  (4)  [v3.0]
 - Lorentz (D=4)
 - Poincaré (D=4)
 
-Sp(2N), Majorana spinors, conformal, exceptional groups: deferred to
-v2.6+ (see ``v2_5_redirect.md`` §6).
+Sp(2N) added in v3.0 (catalog expansion, see ``v3_catalog_expansion.md``).
+Majorana spinors, conformal, exceptional groups: deferred (v3.1+).
 
 Each entry carries enough metadata for two consumers:
 1. The dataset generator (M2) — pick supported reps and invariant
@@ -49,7 +50,9 @@ class CatalogEntry:
 
     @property
     def label(self) -> str:
-        """Concrete ranking token: 'U(3)', 'SO(4)', 'Lorentz', 'Poincare'."""
+        """Concrete ranking token: 'U(3)', 'SO(4)', 'Sp(6)', 'Lorentz'."""
+        if "2N" in self.group_name:  # Sp(2N): N stores rank → dim 2N
+            return self.group_name.replace("2N", str(2 * self.N))
         if "N" in self.group_name:
             return self.group_name.replace("N", str(self.N))
         return self.group_name
@@ -67,7 +70,7 @@ def _u1_entry() -> CatalogEntry:
 
 
 def _classical_entry(group_name: str, N: int) -> CatalogEntry:
-    """U(N), SU(N), O(N), SO(N) for N>=2."""
+    """U(N), SU(N), O(N), SO(N) for N>=2; Sp(2N) where N is the rank."""
     if group_name in ("U(N)", "SU(N)"):
         family = "unitary"
         reps = ("singlet", "fund", "antifund", "adj")
@@ -78,6 +81,11 @@ def _classical_entry(group_name: str, N: int) -> CatalogEntry:
         reps = ("singlet", "vector")
         # SO(N) has ε_{i1..iN}, O(N) doesn't (reflection flips its sign).
         invariants = ("delta", "epsilon") if group_name == "SO(N)" else ("delta",)
+    elif group_name == "Sp(2N)":
+        # N = symplectic rank → vector rep dim 2N. Preserves antisymmetric Ω.
+        family = "symplectic"
+        reps = ("singlet", "vector")
+        invariants = ("omega",)
     else:
         raise ValueError(f"unknown classical group {group_name!r}")
     return CatalogEntry(group_name, N, family, reps, invariants)
@@ -110,10 +118,13 @@ CATALOG: tuple[CatalogEntry, ...] = (
     *(_classical_entry("SU(N)", N) for N in (2, 3, 4, 5)),
     *(_classical_entry("O(N)",  N) for N in (2, 3, 4, 5)),
     *(_classical_entry("SO(N)", N) for N in (2, 3, 4, 5)),
+    # Sp(2N) v3.0: rank N=2..5 → Sp(4), Sp(6), Sp(8), Sp(10).
+    # N=1 (Sp(2)≅SU(2)) omitted to avoid degeneracy with the SU(2) entry.
+    *(_classical_entry("Sp(2N)", N) for N in (2, 3, 4, 5)),
     _lorentz_entry(),
     _poincare_entry(),
 )
-assert len(CATALOG) == 19, f"expected 19 catalog entries, got {len(CATALOG)}"
+assert len(CATALOG) == 23, f"expected 23 catalog entries, got {len(CATALOG)}"
 
 
 def all_labels() -> list[str]:
@@ -167,6 +178,15 @@ def build_groupspec(entry: CatalogEntry, *, prefix: str = ""):
             dim=entry.N, indices="ijklmnpqrstuv", metric="delta",
         )
         return classical_group_spec(name, entry.N, space)
+
+    if entry.family == "symplectic":
+        name = entry.label  # "Sp(4)", "Sp(6)"
+        vector_dim = 2 * entry.N  # entry.N = rank
+        space = IndexSpace(
+            f"{prefix}{name.lower().replace('(', '_').replace(')', '')}_vec",
+            dim=vector_dim, indices="ijklmnpqrstuv", metric="omega",
+        )
+        return classical_group_spec(name, vector_dim, space)
 
     if entry.family == "lorentz":
         return _build_lorentz_spec(prefix=prefix)
