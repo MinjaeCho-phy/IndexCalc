@@ -35,8 +35,9 @@ from indexcalc.lions.catalog import CATALOG, CatalogEntry
 # - "epsilon" + metric=""      → unitary (SU only — fund space)
 # - "omega" + metric=""        → symplectic (Sp — antisym form, metric-less space)
 # - "eta"   + metric="eta"   → lorentz/poincare
+# - "eta_conf" + metric="conf" → conformal SO(d,2) (symmetric, indefinite)
 # - "gamma" + metric="eta"   → lorentz/poincare (Dirac γ^μ)
-INVARIANT_TENSORS = ("delta", "epsilon", "omega", "eta", "gamma")
+INVARIANT_TENSORS = ("delta", "epsilon", "omega", "eta", "eta_conf", "gamma")
 
 
 # ─── Tensor signature collection ────────────────────────
@@ -63,6 +64,9 @@ def collect_tensor_signature(expr: TensorExpr) -> set[tuple[str, int, str]]:
                 name = e.name
                 if name == "eta" and sp.metric == "delta":
                     name = "delta"
+                # Same quirk on a conformal (metric="conf") space → η^conf.
+                elif name == "eta" and sp.metric == "conf":
+                    name = "eta_conf"
                 # M5.B.3: slot count matters for ε (SU(N)'s ε is N-slot,
                 # SO(N)'s ε is N-slot, Lorentz ε_μνρσ is 4-slot). The OOD
                 # eval surfaced cases where the enumerator emits a 2-slot
@@ -200,6 +204,8 @@ def _owned_space_signature(entry: CatalogEntry) -> tuple[int, str] | None:
         return (entry.N, "delta")
     if fam == "symplectic":
         return (2 * entry.N, "")        # 2N-dim vector, metric-less
+    if fam == "conformal":
+        return (entry.N + 2, "conf")    # SO(d,2): (d+2)-dim embedding space
     if fam in ("lorentz", "poincare"):
         return (4, "eta")
     raise ValueError(f"unknown family {entry.family!r} in {entry!r}")
@@ -232,6 +238,10 @@ def _entry_compatible_with_sig(
                 return False
         elif entry.family == "symplectic":
             if slot_count != 2:
+                return False
+        elif entry.family == "conformal":
+            # ε on SO(d,2) is the (d+2)-slot Levi-Civita of the embedding space.
+            if name == "epsilon" and slot_count != entry.N + 2:
                 return False
         elif entry.family in ("lorentz", "poincare"):
             if name == "epsilon" and slot_count != 4:

@@ -193,6 +193,50 @@ def _setup_unitary(entry: CatalogEntry, *, prefix: str, n_fields: int) -> Catalo
     return CatalogSetup(entry, spec, fund, reg, invariants)
 
 
+def _setup_conformal(entry: CatalogEntry, *, prefix: str, n_fields: int) -> CatalogSetup:
+    """Conformal SO(d,2): vector fields on the (d+2)-dim embedding space with
+    the indefinite ``conf`` metric + symmetric η^conf (+ (d+2)-slot ε).
+
+    Mirrors ``_setup_orthogonal`` (η^conf is symmetric like δ) with a distinct
+    metric name so the labeler separates it from Euclidean SO(d+2) and Sp(d+2).
+    The like-position auto-insert emits a tensor named "eta" on the conf space;
+    ``collect_tensor_signature`` normalizes that to "eta_conf".
+    """
+    spec = build_groupspec(entry, prefix=prefix)
+    label = entry.label  # "SO(4,2)"
+    emb_dim = entry.N + 2
+    space = IndexSpace(
+        f"{prefix}{label.lower().replace('(', '_').replace(')', '').replace(',', '_')}_vec",
+        dim=emb_dim, indices="ABCDEFGHIJKL", metric="conf",
+    )
+    reg = FieldRegistry()
+    for i in range(n_fields):
+        reg.add(FieldSpec(
+            name=f"F{i+1}",
+            slots=(SlotSpec(space, "upper"),),
+            reps={label: "vector"},
+            mass_dim=1.0, statistics="bosonic",
+        ))
+
+    invariants: list[InvariantTensorSpec] = []
+    if "eta_conf" in entry.invariants:
+        invariants.append(InvariantTensorSpec(
+            name="eta_conf",
+            slots=(SlotSpec(space, "lower"), SlotSpec(space, "lower")),
+            symmetric_pairs=((0, 1),),
+        ))
+    if "epsilon" in entry.invariants:
+        slots = tuple(SlotSpec(space, "lower") for _ in range(emb_dim))
+        antisym_pairs = tuple(
+            (a, b) for a in range(emb_dim) for b in range(a + 1, emb_dim)
+        )
+        invariants.append(InvariantTensorSpec(
+            name="epsilon",
+            slots=slots, antisymmetric_pairs=antisym_pairs,
+        ))
+    return CatalogSetup(entry, spec, space, reg, invariants)
+
+
 def _setup_lorentz_like(entry: CatalogEntry, *, prefix: str, n_fields: int) -> CatalogSetup:
     """Lorentz / Poincaré: D=4 spacetime + Dirac + Weyl. First round = vector
     fields only (spinor enumeration deferred — requires Fermi parity care
@@ -246,6 +290,8 @@ def setup_for_entry(
         return _setup_orthogonal(entry, prefix=prefix, n_fields=n_fields)
     if family == "symplectic":
         return _setup_symplectic(entry, prefix=prefix, n_fields=n_fields)
+    if family == "conformal":
+        return _setup_conformal(entry, prefix=prefix, n_fields=n_fields)
     if family in ("lorentz", "poincare"):
         return _setup_lorentz_like(entry, prefix=prefix, n_fields=n_fields)
     raise ValueError(f"unknown family {family!r}")

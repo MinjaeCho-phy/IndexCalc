@@ -40,6 +40,7 @@ NODE_NAME = {
     "F1": 1, "F2": 2, "F3": 3, "F4": 4, "F5": 5, "F6": 6, "F7": 7, "F8": 8,
     # invariants
     "eta": 10, "delta": 11, "gamma": 12, "epsilon": 13, "omega": 14,
+    "eta_conf": 15,
     # operators
     "partial": 20, "TimeDeriv": 21, "ScalarFunction": 22,
 }
@@ -51,7 +52,7 @@ NODE_NAME = {
 # correctly.
 
 INVARIANT_TENSOR_NAMES = frozenset({
-    "eta", "delta", "gamma", "epsilon", "omega",
+    "eta", "delta", "gamma", "epsilon", "omega", "eta_conf",
     # v1.x spinor projectors / Lorentz invariants — included for legacy
     # compatibility even though v2.5 doesn't enumerate them yet.
     "P_L", "P_R", "gamma5", "Sigma",
@@ -89,7 +90,7 @@ PROP_ANTISYM = {"unknown": 0, "none": 1, "has_antisym": 2}
 # (metric="delta"), Lorentz-like (metric="eta"), or unitary fund
 # (metric="") space. Crucial for separating SU(N) ε from SO(N) ε.
 
-PRIMARY_METRIC = {"unknown": 0, "none": 1, "delta": 2, "eta": 3}
+PRIMARY_METRIC = {"unknown": 0, "none": 1, "delta": 2, "eta": 3, "conf": 4}
 
 
 # ─── v3.1 tuning: discrete primary-dim vocab ─────────────

@@ -207,6 +207,36 @@ def standard_sp_2n_invariants(N: int) -> list[InvariantTensor]:
     ]
 
 
+def standard_conformal_invariants(d: int) -> list[InvariantTensor]:
+    """Conformal group $SO(d,2)$ in the embedding-space formalism.
+
+    Treated as an orthogonal group acting on a $(d+2)$-dimensional space
+    with an indefinite $(d,2)$-signature metric $\\eta^{\\mathrm{conf}}_{AB}$
+    — exactly as the Lorentz group is $SO(1,d-1)$ with $\\eta_{ab}$. The
+    signature does not change the IR contraction structure (a symmetric
+    2-index invariant), so this mirrors ``standard_so_n_invariants`` with a
+    distinct tensor/metric name to separate it from Euclidean δ and Lorentz η.
+
+    Parameters
+    ----------
+    d : int
+        Spacetime dimension; the conformal group is $SO(d,2)$ acting on
+        the $(d+2)$-dim embedding space.
+    """
+    g = f"SO({d},2)"
+    return [
+        InvariantTensor(
+            "eta_conf", g, ("vector_lower", "vector_lower"), "symmetric"
+        ),
+        InvariantTensor(
+            "eta_conf_mixed", g, ("vector_upper", "vector_lower"), None
+        ),
+        InvariantTensor(
+            "epsilon", g, ("vector_lower",) * (d + 2), "totally_antisymmetric"
+        ),
+    ]
+
+
 def standard_so_n_invariants(N: int) -> list[InvariantTensor]:
     """$SO(N)$ vector rep — $O(N)$의 invariants + $\\epsilon_{i_1\\cdots i_N}$.
 

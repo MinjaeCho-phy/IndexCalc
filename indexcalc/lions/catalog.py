@@ -5,18 +5,21 @@ re-runs invariance proofs at inference time. Instead it scores a
 Lagrangian against a fixed catalog of (group, N) prototypes and returns
 a ranked top-K. This file defines that catalog.
 
-v3.0 round = 23 entries:
+v3.2 round = 26 entries:
 - U(1)
 - U(N), N=2..5      (4)
 - SU(N), N=2..5     (4)
 - O(N), N=2..5      (4)
 - SO(N), N=2..5     (4)
 - Sp(2N), rank N=2..5 → Sp(4),Sp(6),Sp(8),Sp(10)  (4)  [v3.0]
+- SO(d,2) conformal, d=2,3,4 → SO(2,2),SO(3,2),SO(4,2)  (3)  [v3.2]
 - Lorentz (D=4)
 - Poincaré (D=4)
 
-Sp(2N) added in v3.0 (catalog expansion, see ``v3_catalog_expansion.md``).
-Majorana spinors, conformal, exceptional groups: deferred (v3.1+).
+Sp(2N) added v3.0; conformal SO(d,2) added v3.2 (embedding-space formalism —
+orthogonal vector rep on the (d+2)-dim space with an indefinite metric, like
+Lorentz=SO(1,3)). Majorana (a reality condition, not a Lie group) and
+exceptional E_d: deferred. See ``v3_catalog_expansion.md``.
 
 Each entry carries enough metadata for two consumers:
 1. The dataset generator (M2) — pick supported reps and invariant
@@ -91,6 +94,22 @@ def _classical_entry(group_name: str, N: int) -> CatalogEntry:
     return CatalogEntry(group_name, N, family, reps, invariants)
 
 
+def _conformal_entry(d: int) -> CatalogEntry:
+    """Conformal group SO(d,2), embedding-space formalism on (d+2)-dim.
+
+    A genuine Lie group (unlike Majorana, a reality condition), handled like
+    Lorentz=SO(1,3): orthogonal vector rep on the (d+2)-dim embedding space
+    with an indefinite (d,2) metric. ``N`` stores the spacetime dim d; the
+    embedding/vector dim is d+2. Distinguished from Euclidean SO(d+2) (δ
+    metric) and Sp(d+2) (Ω) by the ``conf`` metric on its index space.
+    """
+    return CatalogEntry(
+        group_name=f"SO({d},2)", N=d, family="conformal",
+        supported_reps=("singlet", "vector"),
+        invariants=("eta_conf", "epsilon"),
+    )
+
+
 def _lorentz_entry() -> CatalogEntry:
     return CatalogEntry(
         group_name="Lorentz", N=4, family="lorentz",
@@ -121,10 +140,12 @@ CATALOG: tuple[CatalogEntry, ...] = (
     # Sp(2N) v3.0: rank N=2..5 → Sp(4), Sp(6), Sp(8), Sp(10).
     # N=1 (Sp(2)≅SU(2)) omitted to avoid degeneracy with the SU(2) entry.
     *(_classical_entry("Sp(2N)", N) for N in (2, 3, 4, 5)),
+    # Conformal SO(d,2) v3.2: spacetime d=2,3,4 → embedding dim 4,5,6.
+    *(_conformal_entry(d) for d in (2, 3, 4)),
     _lorentz_entry(),
     _poincare_entry(),
 )
-assert len(CATALOG) == 23, f"expected 23 catalog entries, got {len(CATALOG)}"
+assert len(CATALOG) == 26, f"expected 26 catalog entries, got {len(CATALOG)}"
 
 
 def all_labels() -> list[str]:
@@ -188,6 +209,9 @@ def build_groupspec(entry: CatalogEntry, *, prefix: str = ""):
         )
         return classical_group_spec(name, vector_dim, space)
 
+    if entry.family == "conformal":
+        return _build_conformal_spec(entry, prefix=prefix)
+
     if entry.family == "lorentz":
         return _build_lorentz_spec(prefix=prefix)
 
@@ -203,6 +227,28 @@ def build_groupspec(entry: CatalogEntry, *, prefix: str = ""):
         )
 
     raise ValueError(f"unknown family {entry.family!r} in {entry!r}")
+
+
+def _build_conformal_spec(entry: CatalogEntry, *, prefix: str = ""):
+    """Conformal SO(d,2) spec — orthogonal vector rep on the (d+2)-dim
+    embedding space with the indefinite ``conf`` metric. Generator reuses
+    ``make_o_n_generator`` (the rep action δV^A = M^A_B V^B is signature-
+    independent; the metric only enters invariant contractions)."""
+    from indexcalc.core.generator import make_o_n_generator
+    from indexcalc.lions.probe import GroupSpec
+
+    name = entry.label  # "SO(4,2)"
+    emb_dim = entry.N + 2
+    space = IndexSpace(
+        f"{prefix}{name.lower().replace('(', '_').replace(')', '').replace(',', '_')}_vec",
+        dim=emb_dim, indices="ABCDEFGHIJKL", metric="conf",
+    )
+    dim = emb_dim * (emb_dim - 1) // 2  # SO(d,2): (d+2)(d+1)/2
+    g = Group(name, dim=dim, abelian=False)
+    g.add_rep("vector", dim=emb_dim)
+    g.add_rep("singlet", dim=1)
+    gen = make_o_n_generator(g, space)
+    return GroupSpec(name=name, group=g, generator=gen, dim=dim)
 
 
 def _build_lorentz_spec(*, prefix: str = ""):

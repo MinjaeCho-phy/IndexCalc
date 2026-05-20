@@ -19,8 +19,8 @@ from indexcalc.lions.catalog import (
 # ─── Shape ──────────────────────────────────────────────
 
 
-def test_catalog_size_is_23():
-    assert len(CATALOG) == 23
+def test_catalog_size_is_26():
+    assert len(CATALOG) == 26
 
 
 def test_labels_are_unique():
@@ -97,6 +97,7 @@ def test_su_n_has_epsilon_u_n_does_not():
     "O(2)", "O(3)", "O(4)", "O(5)",
     "SO(2)", "SO(3)", "SO(4)", "SO(5)",
     "Sp(4)", "Sp(6)", "Sp(8)", "Sp(10)",
+    "SO(2,2)", "SO(3,2)", "SO(4,2)",
     "Lorentz", "Poincare",
 ])
 def test_build_groupspec_works_for_every_entry(label):
