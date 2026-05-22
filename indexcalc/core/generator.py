@@ -412,6 +412,7 @@ def lorentz_vector_action(
     frame_space: IndexSpace,
     parameter_names: tuple = ("a", "b"),
     generator_name: str = "M_vec",
+    cometric_antisym: bool = False,
 ) -> ActionFn:
     """Lorentz vector rep 작용 ($SO(1, D-1)$ on 4-vectors and rank-≥1 tensors).
 
@@ -447,6 +448,11 @@ def lorentz_vector_action(
             statistics=field.statistics,
         )
 
+        # Vector row/col are slots 2,3 in both branches. For orthogonal
+        # generators (so(N)) they are antisymmetric *once both are at the same
+        # position* (after the δ-metric raise/lower) — deferred via
+        # cometric_antisymmetric_pairs. Symplectic callers leave this off.
+        cometric = [(2, 3)] if cometric_antisym else None
         if position == "upper":
             # δ V^μ = M^{ab,μ}_ν V^ν
             M = Tensor(
@@ -458,6 +464,7 @@ def lorentz_vector_action(
                     Index(dummy, frame_space, "lower"),
                 ],
                 antisymmetric_pairs=[(0, 1)],
+                cometric_antisymmetric_pairs=cometric,
             )
             return TensorProduct(M, renamed)
         else:
@@ -471,6 +478,7 @@ def lorentz_vector_action(
                     Index(fr_idx.name, frame_space, "lower"),
                 ],
                 antisymmetric_pairs=[(0, 1)],
+                cometric_antisymmetric_pairs=cometric,
             )
             return ScalarMul(-1.0, TensorProduct(renamed, M))
 
@@ -698,6 +706,7 @@ def make_o_n_generator(
     gen = Generator(name or f"M_{group.name}", group)
     vec_act = lorentz_vector_action(
         vector_space, parameter_names, generator_name=generator_name,
+        cometric_antisym=True,
     )
     if group.has_rep("vector"):
         gen.declare_action("vector", vec_act)

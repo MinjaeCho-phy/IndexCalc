@@ -56,6 +56,7 @@ def rename_index(expr: TensorExpr, mapping: dict[str, str]) -> TensorExpr:
             symmetric_pairs=list(expr.symmetric_pairs),
             traceless=list(expr.traceless),
             transverse=list(expr.transverse),
+            cometric_antisymmetric_pairs=list(expr.cometric_antisymmetric_pairs),
             reps=dict(expr.reps),
             statistics=expr.statistics,
         )
@@ -706,7 +707,33 @@ def commute_partial_through_constants(expr: TensorExpr) -> TensorExpr:
     -----
     Index space 기준이 아니라 ``reps`` 기준 — Σ^{ab} 가 frame 인덱스를
     갖더라도 (frame == spacetime인 setup에서) constant 판정.
+
+    ``TimeDeriv`` (NR mechanics ∂_t) 도 같은 규칙으로 처리한다: 회전 변분
+    δ(Φ̇^i) = ∂_t(M^{ab,i}_j Φ^j) 에서 상수 generator M 을 밖으로 빼야
+    M 이 top-level factor 가 되어 ``is_zero_by_antisym_swap`` 이 발화한다.
     """
+    from indexcalc.adm import TimeDeriv
+    if isinstance(expr, TimeDeriv):
+        inner = commute_partial_through_constants(expr.expr)
+        if isinstance(inner, TensorProduct):
+            left, right = inner.left, inner.right
+            left_dyn = _is_dynamic_field(left)
+            right_dyn = _is_dynamic_field(right)
+            if not left_dyn and right_dyn:
+                return TensorProduct(
+                    left, commute_partial_through_constants(TimeDeriv(right)),
+                )
+            if left_dyn and not right_dyn:
+                return TensorProduct(
+                    commute_partial_through_constants(TimeDeriv(left)), right,
+                )
+            if inner is not expr.expr:
+                return TimeDeriv(inner)
+            return expr
+        if inner is not expr.expr:
+            return TimeDeriv(inner)
+        return expr
+
     if isinstance(expr, PartialDeriv):
         inner = commute_partial_through_constants(expr.expr)
         if isinstance(inner, TensorProduct):
@@ -1619,8 +1646,12 @@ def _is_metric_factor_for_absorption(M: TensorExpr, mreg=None) -> bool:
         return False
     if mreg is not None and mreg.is_metric(M):
         return True
-    # Heuristic fallback (LIONS builders.make_eta convention)
-    if M.name != "eta":
+    # Heuristic fallback: the symmetric same-position metric of a space, with
+    # no group reps. "eta" (Lorentz/conformal/O(D,D) — the matcher auto-inserts
+    # the metric as a tensor named "eta" on every such space) and "delta" (the
+    # orthogonal SO(N) δ_ij). "omega" is antisymmetric → excluded by the
+    # same-position symmetric guards below, so the set stays exhaustive.
+    if M.name not in ("eta", "delta"):
         return False
     if M.reps:
         return False
@@ -1633,13 +1664,21 @@ def _is_metric_factor_for_absorption(M: TensorExpr, mreg=None) -> bool:
 def _find_slot_with_name(F: TensorExpr, name: str) -> int | None:
     """Tensor F의 인덱스 슬롯 중 이름이 ``name``인 것의 위치 반환.
 
-    PartialDeriv/CovariantDeriv wrapper의 deriv_index는 별도 path —
-    여기선 metric 흡수가 inner Tensor에 대해서만이라 None 반환 (deferred).
+    ∂_t / ∂_μ wrapper 안의 Tensor 슬롯도 descend해서 찾는다 (예: δ_ij Φ̇^i Φ̇^j
+    에서 j 가 ∂_t(Φ^j) 안에 있는 경우). 이는 host **존재** 확인용 — wrapped
+    host 는 rebuild 대상이 아니라 그 bare 파트너로 흡수된다. deriv_index 자체로
+    의 흡수는 여전히 deferred (``.expr`` 만 내려감).
     """
     if isinstance(F, Tensor):
         for s, idx in enumerate(F.indices):
             if idx.name == name:
                 return s
+        return None
+    if isinstance(F, (PartialDeriv, CovariantDeriv)):
+        return _find_slot_with_name(F.expr, name)
+    from indexcalc.adm import TimeDeriv
+    if isinstance(F, TimeDeriv):
+        return _find_slot_with_name(F.expr, name)
     return None
 
 
@@ -1656,6 +1695,7 @@ def _rebuild_with_renamed_slot(
         symmetric_pairs=list(F.symmetric_pairs),
         traceless=list(F.traceless),
         transverse=list(F.transverse),
+        cometric_antisymmetric_pairs=list(F.cometric_antisymmetric_pairs),
         reps=dict(F.reps),
         statistics=F.statistics,
     )
@@ -1731,12 +1771,23 @@ def absorb_einstein_metric(expr: TensorExpr, mreg=None) -> TensorExpr:
         if host_0[0] == host_1[0]:
             continue  # self-trace (deferred)
 
-        j_a, slot_a = host_0
-        F_a = factors[j_a]
-        if not isinstance(F_a, Tensor):
-            continue
         new_pos = M.indices[0].position
-        F_a_new = _rebuild_with_renamed_slot(F_a, slot_a, n_1, new_pos)
+        # Absorb by renaming whichever host is a bare Tensor (rebuildable):
+        #   η_{n0 n1} S^{n0} → S_{n1}   (modify host_0 → name n_1)
+        #   η_{n0 n1} T^{n1} → T_{n0}   (modify host_1 → name n_0)
+        # Both are valid; host_0 stays the default (preserves existing behaviour),
+        # but if host_0 is wrapped in ∂_t / ∂_μ we fall back to its bare partner
+        # so δ_ij Φ̇^i Φ̇^j still absorbs.
+        modify = None
+        for (host, target) in ((host_0, n_1), (host_1, n_0)):
+            j_h, slot_h = host
+            if isinstance(factors[j_h], Tensor):
+                modify = (j_h, slot_h, target)
+                break
+        if modify is None:
+            continue
+        j_a, slot_a, target = modify
+        F_a_new = _rebuild_with_renamed_slot(factors[j_a], slot_a, target, new_pos)
 
         new_list: list[TensorExpr] = []
         for i, f in enumerate(factors):
@@ -1745,6 +1796,84 @@ def absorb_einstein_metric(expr: TensorExpr, mreg=None) -> TensorExpr:
             new_list.append(F_a_new if i == j_a else f)
         return _product_of_factors(new_list)
 
+    return expr
+
+
+# ─── D21: post-absorption cometric antisym promotion ───────
+
+
+def _promote_tensor_cometric(T: Tensor) -> Tensor:
+    """``cometric_antisymmetric_pairs`` 중 두 슬롯이 이제 같은 position(같은
+    IndexSpace)에 온 쌍을 실제 ``antisymmetric_pairs``로 승격한다.
+
+    so(N) generator $M^{ab,i}{}_j$ 는 (vector_row, vector_col) 쌍을 *cometric*
+    antisym으로 들고 있다 — δ-metric이 두 vector 인덱스를 같은 position으로
+    내린(또는 올린) 뒤에만 진짜 반대칭. ``absorb_einstein_metric``이 그렇게
+    한 직후 이 패스가 antisymmetry를 명시화해 ``is_zero_by_antisym_swap``이
+    발화 가능하게 만든다 (antisym $M$ × sym $\\Phi\\Phi$ = 0). 아직 준비 안 된
+    쌍(여전히 mixed position)은 cometric에 남는다.
+    """
+    if not T.cometric_antisymmetric_pairs:
+        return T
+    ready: list[tuple[int, int]] = []
+    pending: list[tuple[int, int]] = []
+    for (s_i, s_j) in T.cometric_antisymmetric_pairs:
+        idx_i, idx_j = T.indices[s_i], T.indices[s_j]
+        # The antisymmetry is metric-defined (M_{ij}=−M_{ji} ∈ so(N)). It holds
+        # position-blind because raise/lower is component-identity on a metric
+        # space (canonical_form collapses position to "*" there) — so we promote
+        # as soon as both slots live in the same metric-carrying space, without
+        # needing them brought to a common position by absorb_einstein_metric.
+        if idx_i.space == idx_j.space and idx_i.space.metric:
+            ready.append((s_i, s_j))
+        else:
+            pending.append((s_i, s_j))
+    if not ready:
+        return T
+    return Tensor(
+        T.name, list(T.indices),
+        antisymmetric_pairs=list(T.antisymmetric_pairs) + ready,
+        symmetric_pairs=list(T.symmetric_pairs),
+        traceless=list(T.traceless),
+        transverse=list(T.transverse),
+        cometric_antisymmetric_pairs=pending,
+        reps=dict(T.reps),
+        statistics=T.statistics,
+    )
+
+
+def promote_cometric_antisym(expr: TensorExpr) -> TensorExpr:
+    """``_promote_tensor_cometric``를 트리 전체에 적용. 승격할 게 없으면 동일
+    객체 반환 (simplify fixed-point 안전)."""
+    if isinstance(expr, Tensor):
+        new_T = _promote_tensor_cometric(expr)
+        return new_T
+    if isinstance(expr, ScalarMul):
+        inner = promote_cometric_antisym(expr.expr)
+        return ScalarMul(expr.scalar, inner) if inner is not expr.expr else expr
+    if isinstance(expr, TensorProduct):
+        L = promote_cometric_antisym(expr.left)
+        R = promote_cometric_antisym(expr.right)
+        return TensorProduct(L, R) if (L is not expr.left or R is not expr.right) else expr
+    if isinstance(expr, TensorSum):
+        L = promote_cometric_antisym(expr.left)
+        R = promote_cometric_antisym(expr.right)
+        return TensorSum(L, R) if (L is not expr.left or R is not expr.right) else expr
+    if isinstance(expr, PartialDeriv):
+        inner = promote_cometric_antisym(expr.expr)
+        return PartialDeriv(inner, expr.deriv_index) if inner is not expr.expr else expr
+    if isinstance(expr, CovariantDeriv):
+        inner = promote_cometric_antisym(expr.expr)
+        return (CovariantDeriv(inner, expr.deriv_index, expr.connections)
+                if inner is not expr.expr else expr)
+    from indexcalc.adm import TimeDeriv
+    if isinstance(expr, TimeDeriv):
+        inner = promote_cometric_antisym(expr.expr)
+        return TimeDeriv(inner) if inner is not expr.expr else expr
+    from indexcalc.core.scalar_function import ScalarFunction
+    if isinstance(expr, ScalarFunction):
+        inner = promote_cometric_antisym(expr.arg)
+        return ScalarFunction(expr.name, inner) if inner is not expr.arg else expr
     return expr
 
 
@@ -1909,6 +2038,7 @@ def simplify(expr: TensorExpr, mreg=None) -> TensorExpr:
         cur = distribute_products(cur)
         cur = pull_scalars(cur)
         cur = absorb_einstein_metric(cur, mreg)
+        cur = promote_cometric_antisym(cur)
         cur = commute_partial_through_constants(cur)
         cur = apply_clifford_sigma_gamma(cur)
         cur = apply_gamma5_gamma_anticommute(cur)

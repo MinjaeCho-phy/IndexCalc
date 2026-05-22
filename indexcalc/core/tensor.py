@@ -131,6 +131,7 @@ class Tensor(TensorExpr):
         symmetric_pairs: list[tuple[int, int]] | None = None,
         traceless: list[tuple[int, int]] | None = None,
         transverse: list[int] | None = None,
+        cometric_antisymmetric_pairs: list[tuple[int, int]] | None = None,
         reps: dict[str, str] | None = None,
         statistics: str = "bosonic",
     ):
@@ -152,6 +153,15 @@ class Tensor(TensorExpr):
         )
         # transverse: ∂^i T_..i.. = 0 이 성립하는 slot 인덱스 목록.
         self.transverse: tuple[int, ...] = tuple(transverse or [])
+        # cometric_antisymmetric_pairs: 두 slot이 **같은 position에 올 때만**
+        # antisymmetric인 쌍 (metric raise/lower 후에 드러나는 antisymmetry).
+        # 예: SO(N) vector-rep generator M^{ab,i}_j 는 mixed position에선 일반
+        # 행렬이지만 i,j 둘 다 내리면 so(N)=반대칭. 생성 시점엔 조건부라 명시
+        # 불가 → simplify의 promote_cometric_antisym 패스가 같은-position에 온
+        # 쌍을 antisymmetric_pairs로 승격한다.
+        self.cometric_antisymmetric_pairs: tuple[tuple[int, int], ...] = tuple(
+            tuple(sorted(p)) for p in (cometric_antisymmetric_pairs or [])
+        )
 
         # ── validation ──────────────────────────────────────
         n = len(self.indices)
@@ -179,6 +189,15 @@ class Tensor(TensorExpr):
         for s in self.transverse:
             if s < 0 or s >= n:
                 raise ValueError(f"invalid transverse slot {s} for rank {n}")
+        for p in self.cometric_antisymmetric_pairs:
+            if p[0] == p[1] or p[0] < 0 or p[1] >= n:
+                raise ValueError(
+                    f"invalid cometric_antisymmetric_pair {p} for rank {n}"
+                )
+            if self.indices[p[0]].space != self.indices[p[1]].space:
+                raise ValueError(
+                    f"cometric_antisymmetric_pair {p} crosses different IndexSpaces"
+                )
 
         # reps: {group_name: rep_name}. 비어있으면 모든 그룹의 singlet으로 간주.
         self.reps: dict[str, str] = dict(reps) if reps else {}

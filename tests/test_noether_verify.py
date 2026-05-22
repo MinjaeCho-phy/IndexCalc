@@ -13,9 +13,13 @@ from indexcalc.core.index import IndexSpace
 from indexcalc.core.tensor import Tensor, TensorSum, ScalarMul
 from indexcalc.core.scalar_function import ScalarFunction
 from indexcalc.core.group import Group
-from indexcalc.core.generator import Generator, make_o_n_generator, u1_action
+from indexcalc.core.generator import (
+    Generator, make_o_n_generator, make_sp_2n_generator,
+    lorentz_vector_action, u1_action,
+)
+from indexcalc.core.substitution import apply_generator
 from indexcalc.core.variation import ZeroTensor
-from indexcalc.core.simplify import simplify
+from indexcalc.core.simplify import simplify, collect_factors
 from indexcalc.adm import TimeDeriv
 from indexcalc.core.noether import (
     dt_expand, is_total_time_derivative, verify_symmetry,
@@ -117,15 +121,15 @@ def test_u1_phase_is_exact_symmetry():
     assert res.boundary_term is None
 
 
-def test_son_rotation_hits_known_simplify_gap():
-    """SO(N) rotation of a δ-bilinear: physically δL=0, but simplify cannot
-    cancel it (the M-matrix vector-index antisymmetry is not encoded at IR
-    level — documented gap D21, worked around by probe._structural_check).
-    Recorded here so a future backend fix is validated against it. This gap is
-    *orthogonal* to the C0 TimeDeriv-order fix."""
+def test_son_rotation_of_delta_bilinear_verifies():
+    """SO(N) rotation of a δ-bilinear: δ(δ_ij Φ^i Φ^j) = 0, verified purely
+    algebraically (D21 lift). The orthogonal generator carries its vector-index
+    antisymmetry as ``cometric_antisymmetric_pairs``; once simplify promotes it
+    (so(N) = antisymmetric matrices), antisym M × sym ΦΦ → 0 — no
+    ``probe._structural_check`` workaround needed."""
     gen = make_o_n_generator(_group(), VEC)
     res = verify_symmetry(_mass(), gen, field_names={"Phi"})
-    assert not res.is_symmetry      # ← gap: should be True once SO(N) δ-bilinear lands
+    assert res.is_symmetry and res.exact      # δL = 0 exactly
 
 
 # ─── scaling: δΦ = Φ  → NOT a symmetry ──────────────────
@@ -171,16 +175,58 @@ def test_time_translation_verifies_full_kepler():
     assert res.is_symmetry and not res.exact
 
 
-def test_kepler_rotation_blocked_by_d21_gap():
-    """Manifest SO(3) rotation of Kepler is physically a symmetry, but the
-    pure-simplify verifier cannot confirm it: δ(δ-bilinear) leaves M-matrix
-    terms simplify can't cancel (D21 gap). Since SO(4) ⊃ SO(3), the hidden
-    SO(4) is gated on the same D21 lift — NOT on EOM (energy verifies above)
-    nor representation (the 1/r potential is handled). Recorded so the D21 fix
-    is validated against it."""
+def test_kepler_rotation_verifies_after_d21_lift():
+    """Manifest SO(3) rotation of the *full* Kepler L (kinetic + 1/r potential)
+    verifies algebraically after the D21 lift. δ(δ_ij Φ̇^i Φ̇^j) and
+    δ(f(δ_kl Φ^k Φ^l)) both vanish term-by-term (antisym M × sym ΦΦ); the
+    ScalarFunction chain rule carries the f'·0 of the potential. Since
+    SO(4) ⊃ SO(3), the same machinery unblocks the hidden SO(4) rotation
+    sector — this was the C0b gate (not EOM, not representation)."""
     gen = make_o_n_generator(_group(), VEC)
     res = verify_symmetry(_kepler(), gen, field_names={"Phi"})
-    assert not res.is_symmetry      # ← unblocks once D21 SO(N) δ-bilinear lands
+    assert res.is_symmetry and res.exact      # δL = 0 exactly
+
+
+# ─── D21: orthogonal-only scoping of the cometric antisymmetry ──
+
+
+def _generator_M(out):
+    Ms = [f for f in collect_factors(out)
+          if isinstance(f, Tensor) and f.name.startswith("M")]
+    assert len(Ms) == 1, f"expected one generator tensor, got {len(Ms)}"
+    return Ms[0]
+
+
+def test_orthogonal_generator_carries_cometric_antisym():
+    """make_o_n_generator marks the vector slots as cometric-antisymmetric so
+    simplify can promote them once they share a position (so(N) algebra)."""
+    gen = make_o_n_generator(_group(), VEC)
+    M = _generator_M(apply_generator(_phi("i"), gen))
+    assert M.cometric_antisymmetric_pairs      # vector row/col slots
+
+
+def test_symplectic_generator_has_no_cometric_antisym():
+    """Sp(2N) preserves the *antisymmetric* Ω, so its generator is symmetric
+    after lowering — it must NOT inherit the orthogonal antisymmetry, else
+    Ω-bilinears would falsely cancel. Locks D21's orthogonal-only scoping."""
+    sp = Group("Sp(4)", dim=10, abelian=False)
+    sp.add_rep("vector", dim=4)
+    sp.add_rep("singlet", dim=1)
+    spvec = IndexSpace("sp4q", dim=4, indices="ijklmn", metric="omega")
+    spgen = make_sp_2n_generator(sp, spvec)
+    psi = Tensor("Psi", [spvec.upper("i")], reps={"Sp(4)": "vector"})
+    M = _generator_M(apply_generator(psi, spgen))
+    assert not M.cometric_antisymmetric_pairs
+
+
+def test_nonorthogonal_action_does_not_cancel_delta_bilinear():
+    """The δL→0 cancellation is gated on the orthogonal antisym mark, not on
+    δ-bilinear structure alone: the same vector action *without* the mark
+    leaves δL ≠ 0, so the verifier honestly reports 'not verified'."""
+    gen = Generator("N", _group())
+    gen.declare_action("vector", lorentz_vector_action(VEC, cometric_antisym=False))
+    res = verify_symmetry(_mass(), gen, field_names={"Phi"})
+    assert not res.is_symmetry
 
 
 def test_is_total_time_derivative_zero_case():
