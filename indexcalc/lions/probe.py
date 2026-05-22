@@ -35,69 +35,49 @@ from indexcalc.core.variation import ZeroTensor
 
 
 def _check_invariant(expr: TensorExpr, cand: "GroupSpec") -> bool:
-    """Invariance verdict.
+    """Invariance verdict — single algebraic oracle.
 
-    1차: 기존 oracle (apply_generator + strip_time_deriv + simplify).
-         ZeroTensor 도달 시 즉시 True.
-    2차 fallback: structural check — 모든 vector index가 invariant tensor 또는
-         같은 group rep의 field와 contract되어 있는지 + scalar (free=[]) 인지.
+    ``apply_generator`` + ``simplify``: δL → ``ZeroTensor`` ⇔ invariant under
+    the **connected component** of the group. The backend simplifier now closes
+    the SO(N) cases the v2 ``_structural_check`` heuristic used to paper over —
+    δ-bilinear rotations (cometric-antisymmetry of the generator), inter-term
+    cancellations (two-field δ inner products), and Levi-Civita invariance
+    (top-form variation). See ``indexcalc.core.simplify``.
 
-    1차가 충분히 강하지 않은 경우 (e.g., $SO(N)$의 $\\delta$-bilinear cancellation —
-    M 텐서의 vector-index antisymmetry가 IR-level에 명시되지 않아 simplify가 못 줄임)
-    2차가 보완. v2.5에서 backend simplify에 metric absorption + M antisym 인코딩
-    추가하면 1차만으로 충분.
+    The one thing an *infinitesimal* generator cannot see is a **discrete
+    parity**: a Levi-Civita ε is a pseudo-tensor, so an ε-contraction is
+    invariant under SO(N) but flips sign under the improper O(N) ⊃ parity.
+    That single sound caveat is applied after the algebraic verdict.
     """
     delta = apply_generator(expr, cand.generator)
-    delta_stripped = _strip_time_deriv(delta)
-    simplified = simplify(delta_stripped)
-    if isinstance(simplified, ZeroTensor):
-        return True
-    return _structural_check(expr, cand)
-
-
-def _structural_check(expr: TensorExpr, cand: "GroupSpec") -> bool:
-    """Structural fallback: 모든 field가 rep 일관성 + scalar 표현.
-
-    검사 사항:
-    - expr.free_indices == [] (Lagrangian은 스칼라).
-    - 모든 Tensor 잎의 vector-rep 인덱스 (rep="vector"가 등록된 그룹의 vector
-      IndexSpace 인덱스) 가 expression 내 어딘가에서 contract됨.
-    - 인덱스 contraction 양 끝이 (vector field) 또는 (이 그룹의 등록된 invariant
-      tensor) 인지.
-
-    이 함수는 simplify가 못 잡는 cancellation을 우회하기 위한 v2 임시 대안.
-    false-positive 위험: 정말 깨진 라그랑지안인데 인덱스 구조만 맞춘 케이스를
-    못 잡을 수 있음. NR mechanics + 4 classical groups 범위에서는 충분.
-    """
-    if expr.free_indices:
+    simplified = simplify(_strip_time_deriv(delta))
+    if not isinstance(simplified, ZeroTensor):
         return False
-
-    # vector rep을 가진 group의 vector IndexSpace 식별.
-    # GroupSpec의 generator action을 만든 vector_space를 inspect.
-    vector_space = _find_vector_space(cand)
-    if vector_space is None:
-        return False  # group이 vector rep을 안 가짐 — 별도 처리 필요
-
-    leaves = _collect_tensor_leaves(expr)
-    for leaf in leaves:
-        is_invariant_tensor = _is_known_invariant(leaf.name, cand.name)
-        if is_invariant_tensor:
-            continue  # δ, ε 같은 등록 invariant는 vector index 허용.
-        rep = leaf.reps.get(cand.name)
-        if rep is None:
-            # rep 태그 없음 — vector index가 있으면 위반.
-            for idx in leaf.indices:
-                if idx.space == vector_space:
-                    return False
-            continue
-        if rep == "singlet":
-            # singlet이라면 vector index를 가지면 안 됨 (rep mismatch).
-            for idx in leaf.indices:
-                if idx.space == vector_space:
-                    return False
-        # rep == "vector"이면 contraction 여부는 expr.free_indices == []
-        # 에서 이미 검사됨.
+    if _epsilon_breaks_under_improper(expr, cand):
+        return False
     return True
+
+
+def _epsilon_breaks_under_improper(expr: TensorExpr, cand: "GroupSpec") -> bool:
+    """Sound discrete-parity caveat: an improper orthogonal group O(N) (which,
+    unlike SO(N), contains the parity element det = −1) does **not** preserve a
+    Levi-Civita ε contraction — ε is a pseudo-tensor. The infinitesimal
+    generator alone (so(N) = o(N) Lie algebra) cannot detect this, so the
+    algebraic δL = 0 verdict is overridden here.
+
+    Returns True (⇒ NOT invariant) iff ``cand`` is an improper O(N) group and
+    ``expr`` contains a Levi-Civita ε on that group's vector space.
+    """
+    if not cand.name.startswith("O("):       # SO(N), U(N), Sp(2N), … : not improper
+        return False
+    vector_space = _find_vector_space(cand)
+    for leaf in _collect_tensor_leaves(expr):
+        if leaf.name == "epsilon" and (
+            vector_space is None
+            or any(idx.space == vector_space for idx in leaf.indices)
+        ):
+            return True
+    return False
 
 
 def _find_vector_space(cand: "GroupSpec"):
@@ -139,18 +119,6 @@ def _collect_tensor_leaves(expr: TensorExpr) -> list[Tensor]:
     if isinstance(expr, ScalarFunction):
         return _collect_tensor_leaves(expr.arg)
     return []
-
-
-_STANDARD_O_INVARIANTS = {"delta", "delta_mixed", "epsilon"}
-
-
-def _is_known_invariant(tensor_name: str, group_name: str) -> bool:
-    """등록된 표준 invariant tensor인가? v2 범위: O(N)/SO(N)의 delta·epsilon만."""
-    if not (group_name.startswith("O(") or group_name.startswith("SO(")):
-        return False
-    if tensor_name == "epsilon" and not group_name.startswith("SO("):
-        return False  # epsilon은 SO(N) 한정
-    return tensor_name in _STANDARD_O_INVARIANTS
 
 
 def _strip_time_deriv(expr: TensorExpr) -> TensorExpr:

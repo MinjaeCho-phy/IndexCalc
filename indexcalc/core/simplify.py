@@ -247,6 +247,15 @@ def canonical_form_modulo_dummies(expr: TensorExpr) -> tuple:
     NOT used by ``is_zero_by_antisym_swap`` — 거기선 free renaming이 false positive
     (X·Y 류)를 일으키므로 strict ``canonical_form``을 유지.
     """
+    renamed = _dummy_canonical_factors(expr)
+    return tuple(sorted(_factor_key_no_swap(f, ()) for f in renamed))
+
+
+def _dummy_canonical_factors(expr: TensorExpr) -> list[TensorExpr]:
+    """``expr``의 factor들을 정렬하고 dummy 인덱스를 ``_d0, _d1, …``로 canonical
+    rename한 리스트를 반환한다. ``canonical_form_modulo_dummies``의 key 계산과,
+    inter-term antisym 상쇄 패스의 부호 정규화가 공유한다.
+    """
     factors = collect_factors(expr)
 
     # 1. dummy 식별 — count == 2 + free_indices에 없음
@@ -273,9 +282,7 @@ def canonical_form_modulo_dummies(expr: TensorExpr) -> tuple:
                 mapping[nm] = f"_d{counter}"
                 counter += 1
 
-    # 4. mapping 적용 후 full key로 정렬
-    renamed = [rename_index(f, mapping) for f in sorted_factors]
-    return tuple(sorted(_factor_key_no_swap(f, ()) for f in renamed))
+    return [rename_index(f, mapping) for f in sorted_factors]
 
 
 # ─── antisym × symmetric → 0 ────────────────────────────────
@@ -1620,6 +1627,157 @@ def collect_scalar_terms(expr: TensorExpr) -> TensorExpr:
     return result
 
 
+# ─── D21b: inter-term antisymmetric cancellation ───────────
+
+
+def is_zero_by_antisym_term_cancellation(expr: TensorExpr) -> TensorExpr:
+    """A ``TensorSum`` that vanishes by *inter-term* antisymmetry.
+
+    Each summand carries an antisymmetric tensor — a promoted so(N) generator,
+    a Levi-Civita ε, … — contracted into an otherwise symmetric structure, and
+    the terms cancel pairwise only once the antisym index order is
+    sign-normalized. Two such terms have the *same* body up to an antisym index
+    swap, i.e. equal canonical bodies with opposite signs; ``collect_scalar_terms``
+    misses them because it groups bodies without folding the swap parity.
+
+    This pass folds that parity (via ``normalize_antisym_signs``) into each
+    summand's coefficient, groups by the dummy-agnostic canonical body, and — if
+    *every* group sums to zero — returns ``ZeroTensor``. It is **detect-only**:
+    on a non-zero sum it returns ``expr`` unchanged, so it never rewrites an
+    intermediate form and cannot disturb the single-term, position-collapsed
+    cancellation paths (e.g. the M7-C fold of ``W^A_{μν} W_A^{μν}``) that
+    ``canonical_form_with_sign`` is documented to break.
+
+    Examples it closes (probe SO(N) oracle, formerly ``_structural_check``):
+      - ε_{ijk} A^i B^j C^k  rotation: three terms cancel.
+      - δ_ij A^i B^j  rotation (two *distinct* fields): two terms cancel.
+    """
+    if not isinstance(expr, TensorSum):
+        return expr
+    summands = _flatten_sum(expr)
+    if len(summands) < 2:
+        return expr
+
+    groups: dict[tuple, float] = {}
+    for s in summands:
+        coeff, body = _split_scalar(s)
+        if isinstance(body, ZeroTensor):
+            continue
+        # Canonicalise dummy names FIRST, then fold antisym index-order parity:
+        # the sign must be taken relative to the canonical dummy assignment, else
+        # two terms that are negatives map to different keys (each antisym tensor's
+        # slot order is sorted by the now-canonical _dN names).
+        canon = _product_of_factors(_dummy_canonical_factors(body))
+        sign, nbody = _split_scalar(normalize_antisym_signs(canon))
+        key = canonical_form(nbody)
+        groups[key] = groups.get(key, 0.0) + coeff * sign
+
+    if groups and all(abs(c) < 1e-9 for c in groups.values()):
+        return ZeroTensor(expr.free_indices)
+    return expr
+
+
+# ─── D21c: invariance of a top-form (Levi-Civita) ──────────
+
+
+def _is_total_antisym_topform(T: TensorExpr) -> bool:
+    """``T`` is a fully antisymmetric rank-r tensor on a single metric space of
+    dimension r — i.e. a Levi-Civita top form (the unique SO(r)-invariant up to
+    scale). reps may tag it as a singlet of its own group(s)."""
+    if not isinstance(T, Tensor):
+        return False
+    r = len(T.indices)
+    if r < 2:
+        return False
+    sp = T.indices[0].space
+    if not sp.metric or sp.dim != r:
+        return False
+    if any(idx.space != sp for idx in T.indices):
+        return False
+    needed = {(a, b) for a in range(r) for b in range(a + 1, r)}
+    have = {tuple(sorted(p)) for p in T.antisymmetric_pairs}
+    if needed != have:
+        return False
+    if any(v != "singlet" for v in T.reps.values()):
+        return False
+    return True
+
+
+def is_zero_by_invariant_topform_variation(expr: TensorExpr) -> TensorExpr:
+    """δL of a fully-contracted top-form scalar (ε_{i1..iN} V1^{i1}..VN^{iN})
+    under an so(N) generator vanishes: the Levi-Civita top form is SO(N)-
+    invariant (det of a rotation = 1 ⇔ the generator is traceless).
+    ``apply_generator`` produces exactly the N slot-insertions
+    Σ_a ε(.. M V_a ..) = tr(M)·ε(..V..), and tr(M)=0 for an antisymmetric M.
+
+    Detect-only & sound: returns ``ZeroTensor`` only when the summands are
+    exactly those N insertions — one antisymmetric generator (the factor that
+    carries δL's free parameter indices) threaded into one top form, each term
+    hitting a distinct ε slot, all reducing to the *same* base scalar with the
+    *same* coefficient. Otherwise returns ``expr`` unchanged. Cannot disturb
+    other paths (no rewrite). Closes the SO(N) ε-invariance gap that the probe
+    formerly handled with ``_structural_check``."""
+    if not isinstance(expr, TensorSum):
+        return expr
+    free = {idx.name for idx in expr.free_indices}
+    if not free:
+        return expr
+    terms = _flatten_sum(expr)
+
+    bases: list[tuple] = []
+    coeffs: list[float] = []
+    slots_hit: list[int] = []
+    rank: int | None = None
+    for t in terms:
+        coeff, body = _split_scalar(t)
+        if isinstance(body, ZeroTensor):
+            continue
+        factors = collect_factors(body)
+        eps_list = [f for f in factors if _is_total_antisym_topform(f)]
+        if len(eps_list) != 1:
+            return expr
+        eps = eps_list[0]
+        gens = [f for f in factors if isinstance(f, Tensor)
+                and free.issubset({i.name for i in f.indices})]
+        if len(gens) != 1:
+            return expr
+        M = gens[0]
+        nf_slots = [s for s, i in enumerate(M.indices) if i.name not in free]
+        if len(nf_slots) != 2:
+            return expr
+        if tuple(nf_slots) not in {tuple(sorted(p)) for p in M.antisymmetric_pairs}:
+            return expr  # generator must be traceless (antisym in its vector pair)
+        eps_names = {i.name for i in eps.indices}
+        n_row = [s for s in nf_slots if M.indices[s].name in eps_names]
+        n_col = [s for s in nf_slots if M.indices[s].name not in eps_names]
+        if len(n_row) != 1 or len(n_col) != 1:
+            return expr
+        row_name = M.indices[n_row[0]].name
+        col_name = M.indices[n_col[0]].name
+        slot = next(s for s, i in enumerate(eps.indices) if i.name == row_name)
+        slots_hit.append(slot)
+        # base = term with M contracted to the identity: drop M, route the field
+        # that carried M's column index straight into the ε slot (col → row).
+        rest = [f for f in factors if f is not M]
+        base = _product_of_factors(
+            [rename_index(f, {col_name: row_name}) for f in rest]
+        )
+        bases.append(canonical_form_modulo_dummies(base))
+        coeffs.append(coeff)
+        if rank is None:
+            rank = len(eps.indices)
+
+    if rank is None or len(bases) != rank:
+        return expr                      # need exactly N = ε-rank summands
+    if len(set(slots_hit)) != rank:
+        return expr                      # each slot hit exactly once
+    if any(b != bases[0] for b in bases):
+        return expr                      # all reduce to the same base scalar
+    if any(abs(c - coeffs[0]) > 1e-9 for c in coeffs):
+        return expr                      # uniform coefficient → clean trace
+    return ZeroTensor(expr.free_indices)
+
+
 # ─── M9.6: metric absorption (Einstein raise/lower) ────────
 
 
@@ -1653,7 +1811,10 @@ def _is_metric_factor_for_absorption(M: TensorExpr, mreg=None) -> bool:
     # same-position symmetric guards below, so the set stays exhaustive.
     if M.name not in ("eta", "delta"):
         return False
-    if M.reps:
+    # A metric may be rep-tagged as a singlet of its own group(s) (it is the
+    # invariant tensor, after all) — that still counts. Only a non-trivial rep
+    # (vector/fund/…) disqualifies it from being treated as the metric.
+    if any(r != "singlet" for r in M.reps.values()):
         return False
     sym_set = {tuple(sorted(p)) for p in M.symmetric_pairs}
     if (0, 1) not in sym_set:
@@ -2046,6 +2207,8 @@ def simplify(expr: TensorExpr, mreg=None) -> TensorExpr:
         cur = apply_chiral_projector_identities(cur)
         cur = apply_epsilon_su_n_invariance(cur)
         cur = collect_scalar_terms(cur)
+        cur = is_zero_by_antisym_term_cancellation(cur)
+        cur = is_zero_by_invariant_topform_variation(cur)
         cur = _simplify_zeros(cur)
         if cur is prev:
             break

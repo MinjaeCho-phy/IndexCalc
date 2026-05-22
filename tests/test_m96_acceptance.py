@@ -161,13 +161,20 @@ def test_e_self_trace_not_absorbed(st):
     assert "eta" in str(out), "self-trace must not absorb (deferred case)"
 
 
-# ─── M9.6-F: X·Y·η false-positive guard ───────────────────
+# ─── M9.6-F → D21b: adjoint Killing inner product is invariant ──
 
 
-def test_f_xy_eta_not_zeroed(adj):
-    """f^A_{Pa} X^a Y_A (X ≠ Y) must NOT simplify to zero — the antisym
-    × symmetric cancellation needs the two host tensors to be the same
-    instance (which dummy renaming after metric absorption preserves)."""
+def test_f_xy_eta_adjoint_inner_product_invariant(adj):
+    """η_{AB} X^A Y^B (X ≠ Y, both adjoint) IS SU(2)-invariant — the Killing
+    inner product is Ad-invariant for a totally antisymmetric f:
+    δL = f_{Bbc}(X^c Y^B + X^B Y^c) = (antisym in B,c)·(sym in B,c) = 0.
+
+    M9.6 left this as a non-zero sum because the cancellation is *inter-term*
+    (between the two Leibniz terms), which is_zero_by_antisym_swap — a per-
+    product rule — cannot see. The D21b is_zero_by_antisym_term_cancellation
+    pass folds the antisym parity across terms and now confirms δL = 0.
+    (Distinct host tensors are fine: it is the structure, not instance
+    identity, that matters.)"""
     g = Group("SU(2)", dim=3, abelian=False)
     g.add_rep("adj", dim=3)
     g.add_rep("singlet", dim=1)
@@ -179,10 +186,19 @@ def test_f_xy_eta_not_zeroed(adj):
                      symmetric_pairs=[(0, 1)], reps={})
     L = TensorProduct(TensorProduct(X, Y), eta_adj)
 
-    delta = apply_generator(L, gen)
-    final = simplify(delta)
-    # δ(X·Y) ≠ 0 in general because X and Y are distinct tensors; the
-    # combination is not SU(2)-invariant.
-    assert not isinstance(final, ZeroTensor), (
-        f"X·Y false positive: simplify zeroed when it shouldn't have"
-    )
+    final = simplify(apply_generator(L, gen))
+    assert isinstance(final, ZeroTensor)
+
+
+def test_f_xy_free_indices_not_zeroed(adj):
+    """Control: X^A Y^B with *free* adjoint indices (no η contraction) is not a
+    scalar and must NOT be zeroed — guards the D21b pass against over-firing."""
+    g = Group("SU(2)", dim=3, abelian=False)
+    g.add_rep("adj", dim=3)
+    g.add_rep("singlet", dim=1)
+    gen = make_su_n_generator(g, adj, parameter_name="P")
+
+    X = Tensor("X", [adj.upper("A")], reps={"SU(2)": "adj"})
+    Y = Tensor("Y", [adj.upper("B")], reps={"SU(2)": "adj"})
+    final = simplify(apply_generator(TensorProduct(X, Y), gen))
+    assert not isinstance(final, ZeroTensor)

@@ -681,13 +681,12 @@ def make_o_n_generator(
     $SO(N)$ vs $O(N)$ 구분은 invariant tensor 단계에서 처리
     (ε_{i_1..i_N}는 SO(N) 한정). generator/algebra 수준에서 동일.
 
-    **Backend gap (v2.5 도중 확인):** δ-bilinear $\\delta_{ij}V^iV^j$의 회전
-    invariance를 oracle(apply_generator + simplify)만으로 확인하려면
-    metric absorption + $M^{ab}{}_{ij}$의 vector-index antisymmetric 인코딩
-    + post-absorption antisymmetric_pairs 추론, 세 가지의 coupled 변경 필요.
-    v2.5 범위에서 단일 fix가 작음. ``lions.probe._structural_check``를
-    fallback으로 유지해서 hybrid oracle 유지. v3+ 의 backend cleanup
-    마일스톤에서 단일 path로 통일.
+    **D21 (closed):** δ-bilinear $\\delta_{ij}V^iV^j$의 회전 invariance는 이제
+    oracle(apply_generator + simplify)만으로 확인된다. M의 vector-index
+    antisymmetry($\\mathfrak{so}(N)$=반대칭)를 ``cometric_antisymmetric_pairs``로
+    들고, metric이 두 인덱스를 같은 공간으로 묶으면 simplify가 antisym으로
+    승격 → antisym M × sym ΦΦ = 0. 더는 ``_structural_check`` fallback이
+    필요없다(폐기됨). ``cometric_antisym=True``로 표시.
 
     Examples
     --------
@@ -733,11 +732,11 @@ def make_sp_2n_generator(
     $Sp(2N)$과 $O(2N)$의 차이는 *invariant tensor* 단계에서만 드러난다:
     $O(N)$은 대칭 $\\delta_{ij}$, $Sp(2N)$은 **반대칭** symplectic form
     $\\Omega_{ij} = -\\Omega_{ji}$ 를 보존한다 (``standard_sp_2n_invariants``).
-    $Sp$ 대수 조건 ($M^T\\Omega + \\Omega M = 0$, 즉 $\\Omega M$ 대칭) 자체는
-    $O(N)$의 δ-bilinear 와 동일하게 oracle(apply_generator+simplify)만으로는
-    완결되지 않으며 ``lions.probe._structural_check`` fallback에 의존한다
-    (``make_o_n_generator`` 의 backend gap 노트 참조). v3+ backend cleanup에서
-    단일 path로 통일.
+    $Sp$ 대수 조건은 $\\Omega M$ *대칭*이라 orthogonal과 반대 — 따라서 Sp
+    generator는 ``cometric_antisym``을 **달지 않는다**(달면 Ω-bilinear을 잘못
+    상쇄). single-boson $\\Omega_{ij}\\phi^i\\phi^j$는 Bose×antisym으로 자명히 0.
+    (probe의 ``_structural_check``는 D21에서 폐기됨 — ``make_o_n_generator``
+    노트 참조.)
 
     Examples
     --------
