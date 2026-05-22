@@ -49,6 +49,10 @@ class GraphNode:
     # indices (TimeDeriv operator, ScalarFunction operator, scalar fields).
     # Optional — v1.x consumers that ignore this field stay unaffected.
     index_spaces: tuple = ()
+    # HS1.0: for a ScalarFunction operator node, the function name (e.g.
+    # "inv_sqrt", "exp") so the encoder can tell a 1/r potential (Kepler →
+    # hidden SO(4)) from a generic central potential. "" for all other nodes.
+    func_name: str = ""
 
 
 @dataclass
@@ -116,7 +120,7 @@ def graph_encode(expr: TensorExpr) -> Optional[EncodedGraph]:
             index_spaces=idx_info,
         ), term_id)
         for idx in t.indices:
-            index_occ[idx.name].append((nid, idx.position, idx.space.name))
+            index_occ[idx.name].append((nid, idx.position, idx.space))
         return nid
 
     def walk(e: TensorExpr, term_id: int) -> list[int]:
@@ -153,7 +157,7 @@ def graph_encode(expr: TensorExpr) -> Optional[EncodedGraph]:
                                e.deriv_index.space.metric),),
             ), term_id)
             index_occ[e.deriv_index.name].append(
-                (op_id, e.deriv_index.position, e.deriv_index.space.name),
+                (op_id, e.deriv_index.position, e.deriv_index.space),
             )
             inner_ids = walk(e.expr, term_id)
             for tid in inner_ids:
@@ -180,6 +184,7 @@ def graph_encode(expr: TensorExpr) -> Optional[EncodedGraph]:
             op_id = add_node(GraphNode(
                 kind="operator", name="ScalarFunction", rank=0,
                 reps={}, statistics="bosonic",
+                func_name=e.name,
             ), term_id)
             inner_ids = walk(e.arg, term_id)
             for tid in inner_ids:
@@ -210,16 +215,23 @@ def graph_encode(expr: TensorExpr) -> Optional[EncodedGraph]:
                 f"invalid IR for graph encoding"
             )
         (n1, p1, s1), (n2, p2, s2) = occs
-        if s1 != s2:
+        if s1.name != s2.name:
             raise ValueError(
                 f"index {name!r} contracts across different spaces "
-                f"({s1} vs {s2})"
+                f"({s1.name} vs {s2.name})"
             )
         src, dst = (n1, n2) if n1 < n2 else (n2, n1)
         src_pos, dst_pos = (p1, p2) if n1 < n2 else (p2, p1)
+        # v3.4: key the edge relation on the contraction space's (dim, metric),
+        # not its name — so a hand-built input contracting in a dim-3 δ space
+        # gets the same relation as the enumerator's, whatever the user named
+        # the space. (Names previously fell back to the "unk" EDGE_SPACE
+        # relation for novel inputs, collapsing the model. See
+        # notes/hidden_symmetry.md §2.)
+        space_token = f"{s1.dim}:{s1.metric}"
         edges.append(GraphEdge(
             src=src, dst=dst, kind="contraction",
-            space=s1, src_pos=src_pos, dst_pos=dst_pos,
+            space=space_token, src_pos=src_pos, dst_pos=dst_pos,
         ))
 
     return EncodedGraph(

@@ -48,7 +48,8 @@ def test_h_norm_squared_topology():
     contractions = [e for e in g.edges if e.kind == "contraction"]
     assert len(contractions) == 1
     e = contractions[0]
-    assert e.space == "su2_fund"
+    # v3.4: edge.space is the contraction space's "{dim}:{metric}" token.
+    assert e.space == "2:"  # su2_fund: dim 2, metric-less
     # One upper + one lower (F1: position as edge attribute)
     assert {e.src_pos, e.dst_pos} == {"upper", "lower"}
 
@@ -77,7 +78,7 @@ def test_ff_topology():
     assert len(g.nodes) == 2
     contractions = [e for e in g.edges if e.kind == "contraction"]
     spaces = sorted(e.space for e in contractions)
-    assert spaces == ["spacetime", "spacetime", "su2_adj"]
+    assert spaces == ["3:δ", "4:η", "4:η"]  # v3.4 (dim,metric) tokens
 
 
 # ─── Spec §6.6: PartialDeriv ────────────────────────────
@@ -121,7 +122,7 @@ def test_kinetic_term_topology():
     # μ contracted between two partial nodes; i contracted between H/Hdag.
     contractions = [e for e in g.edges if e.kind == "contraction"]
     spaces = sorted(e.space for e in contractions)
-    assert spaces == ["spacetime", "su2_fund"]
+    assert spaces == ["2:", "4:η"]  # v3.4 (dim,metric) tokens
 
 
 # ─── Spec §6.3: scalar accumulation ────────────────────

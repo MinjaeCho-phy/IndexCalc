@@ -45,12 +45,25 @@ STATISTICS = {"<unk>": 0, "bosonic": 1, "fermionic": 2}
 
 EDGE_KIND = {"<unk>": 0, "contraction": 1, "acts_on": 2}
 
+# v3.4: the edge "space" is the contraction space's canonical "{dim}:{metric}"
+# token (set in graph.py), not its IndexSpace name. This makes the RGCN
+# relation name-independent: a contraction in a dim-3 δ space is the same
+# relation whatever the user named the space, so novel hand-built inputs hit
+# the same trained relations as the enumerator. ("" is the acts_on edge — an
+# operator carries no contraction space.) Unseen tokens fall back to <unk>.
 EDGE_SPACE = {
-    "<unk>": 0, "": 1,
-    "spacetime": 2, "su2_adj": 3, "su2_fund": 4, "su3_fund": 5,
-    "su3_adj": 6, "dirac": 7, "frame": 8,
-    # v2: NR mechanics vector spaces
-    "so3_vec": 9, "so2_vec": 10, "so4_vec": 11,
+    "<unk>": 0,
+    "": 1,                                              # acts_on
+    # metric-less: U/SU fund (2..5), Sp vector (4,6,8,10), Dirac spinor (4)
+    "2:": 2, "3:": 3, "4:": 4, "5:": 5, "6:": 6, "8:": 7, "10:": 8,
+    # Euclidean δ: O/SO vector (2..5)
+    "2:delta": 9, "3:delta": 10, "4:delta": 11, "5:delta": 12,
+    # Lorentz η frame (4)
+    "4:eta": 13,
+    # conformal SO(d,2) embedding, indefinite (4,5,6)
+    "4:conf": 14, "5:conf": 15, "6:conf": 16,
+    # O(D,D) doubled, split signature (4,6,8)
+    "4:dd": 17, "6:dd": 18, "8:dd": 19,
 }
 
 POSITION = {"<unk>": 0, "": 1, "upper": 2, "lower": 3}
@@ -173,11 +186,11 @@ def edge_feature_ids(
     s = _lookup(EDGE_SPACE, space)
     sp = _lookup(POSITION, src_pos)
     dp = _lookup(POSITION, dst_pos)
-    SP_BASE = 16
+    SP_BASE = 32  # v3.4: ≥ len(EDGE_SPACE)=20 (was 16, now (dim,metric) tokens)
     edge_type = k * SP_BASE + s
     return edge_type, [k, s, sp, dp]
 
 
 def num_relations() -> int:
     """Upper bound used when sizing ``RGCNConv``."""
-    return 4 * 16  # 64
+    return 4 * 32  # 128 (4 edge kinds × 32 space-token slots)

@@ -166,6 +166,12 @@ def _factor_key_no_swap(factor: TensorExpr, swap_names: Sequence[str]) -> tuple:
             _index_key(factor.deriv_index, swap_names),
             _factor_key_no_swap(factor.expr, swap_names),
         )
+    from indexcalc.adm import TimeDeriv
+    if isinstance(factor, TimeDeriv):
+        # Encode the inner expression (and thereby the ∂_t nesting depth) —
+        # without this a TimeDeriv collapses to the bare key ("TimeDeriv",),
+        # so Φ̇ and Φ̈ compare equal and simplify falsely cancels them.
+        return ("TimeDeriv", _factor_key_no_swap(factor.expr, swap_names))
     if isinstance(factor, CovariantDeriv):
         return (
             "CovariantDeriv",
@@ -185,6 +191,9 @@ def _collect_factor_index_names(factor: TensorExpr) -> list[str]:
         return _collect_factor_index_names(factor.expr)
     if isinstance(factor, PartialDeriv) or isinstance(factor, CovariantDeriv):
         return [factor.deriv_index.name] + _collect_factor_index_names(factor.expr)
+    from indexcalc.adm import TimeDeriv
+    if isinstance(factor, TimeDeriv):
+        return _collect_factor_index_names(factor.expr)
     return []
 
 

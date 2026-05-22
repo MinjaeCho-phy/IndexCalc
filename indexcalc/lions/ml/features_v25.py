@@ -104,6 +104,39 @@ CATALOG_DIMS = (1, 2, 3, 4, 5, 6, 8, 10)
 PRIMARY_DIM_VOCAB = {0: 0, **{d: i + 1 for i, d in enumerate(CATALOG_DIMS)}}
 
 
+# ─── HS1.0: ScalarFunction potential-class vocab ─────────
+#
+# A ScalarFunction node wraps a non-polynomial central potential f(r²).
+# Hidden (dynamical) symmetry depends on the *shape* of f: only 1/r gives
+# SO(4) (Kepler/LRL), only r² gives SU(N) (isotropic HO). The graph encoder
+# previously collapsed every f to one "ScalarFunction" node, so the model
+# could not separate Kepler from a generic V(r) — teaching SO(4) would have
+# leaked onto all central potentials. This vocab tags the node by physical
+# potential class so SO(4) keys on inv_sqrt alone.
+#   "none"     — node is not a ScalarFunction (the common case)
+#   "generic"  — a ScalarFunction whose name we don't have a class for
+SCALAR_FUNC_CLASS = {
+    "none": 0,
+    "generic": 1,
+    "inv_sqrt": 2,   # 1/r        → Kepler/Coulomb, hidden SO(4)
+    "inverse": 3,    # 1/r²
+    "quadratic": 4,  # r²         (also expressible as a δ mass term)
+    "exp": 5,        # e^{...}
+    "log": 6,
+}
+
+
+def scalar_func_class_id(func_name: str) -> int:
+    """Map a node's ScalarFunction name to its potential-class id.
+
+    "" (not a ScalarFunction node) → "none"; a recognized function name →
+    its class; any other name → "generic".
+    """
+    if not func_name:
+        return SCALAR_FUNC_CLASS["none"]
+    return SCALAR_FUNC_CLASS.get(func_name, SCALAR_FUNC_CLASS["generic"])
+
+
 # ─── Helpers ─────────────────────────────────────────────
 
 
@@ -116,12 +149,14 @@ def node_feature_ids_v25(
     stats_hint: str = "unknown", antisym_hint: str = "unknown",
     primary_dim: int = 0, primary_metric: str = "unknown",
     secondary_dim: int = 0, secondary_metric: str = "unknown",
+    func_name: str = "",
 ) -> list[int]:
     """Return a fixed-length int list for one node.
 
-    Layout (length 10):
+    Layout (length 11):
       [kind, name, rank, statistics, stats_hint, antisym_hint,
-       primary_dim, primary_metric_id, secondary_dim, secondary_metric_id].
+       primary_dim, primary_metric_id, secondary_dim, secondary_metric_id,
+       scalar_func_class_id].
 
     ``primary_dim``/``primary_metric`` describe the node's first (canonically
     sorted) index space; ``secondary_dim``/``secondary_metric`` describe its
@@ -130,6 +165,10 @@ def node_feature_ids_v25(
     ψ^{iα} — charged under two groups at once — expose *both* sectors' (dim,
     metric); without it only the first sector was visible and the model could
     not tell a dim-3 SU(3) internal index from a dim-8 Sp one (v3.3 Sp fix).
+
+    ``func_name`` (HS1.0) is a ScalarFunction node's function name; it maps to
+    a potential-class id so the model can tell a 1/r potential (hidden SO(4))
+    from a generic central potential. "" for every non-ScalarFunction node.
     """
     return [
         _lookup(NODE_KIND, kind),
@@ -142,12 +181,14 @@ def node_feature_ids_v25(
         _lookup(PRIMARY_METRIC, primary_metric if primary_metric else "none"),
         int(secondary_dim),
         _lookup(PRIMARY_METRIC, secondary_metric if secondary_metric else "none"),
+        scalar_func_class_id(func_name),
     ]
 
 
 def num_relations() -> int:
-    """Same edge-type packing as v1.x."""
-    return 4 * 16  # kind ∈ [0,4) × space ∈ [0,16)
+    """Same edge-type packing as v1.x. v3.4: SP_BASE 16→32 (edge "space" is now
+    a (dim,metric) token vocab of ~20 entries, so kind*32+space needs 4*32)."""
+    return 4 * 32  # kind ∈ [0,4) × space-token ∈ [0,32)
 
 
 # Field-name token id pool — used by the random rename augment.

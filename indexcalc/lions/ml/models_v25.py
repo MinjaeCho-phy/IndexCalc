@@ -23,7 +23,8 @@ from torch_geometric.nn import RGCNConv, global_mean_pool
 
 from indexcalc.lions.ml.features_v25 import (
     NODE_KIND, NODE_NAME, STATISTICS, PROP_STATISTICS, PROP_ANTISYM,
-    PRIMARY_METRIC, PRIMARY_DIM_VOCAB, LABEL_ORDER, num_relations,
+    PRIMARY_METRIC, PRIMARY_DIM_VOCAB, SCALAR_FUNC_CLASS, LABEL_ORDER,
+    num_relations,
 )
 
 
@@ -72,6 +73,7 @@ class GroupPrototypeClassifier(nn.Module):
         v_pah = _vsize(PROP_ANTISYM)
         v_metric = _vsize(PRIMARY_METRIC)
         v_pdim = _vsize(PRIMARY_DIM_VOCAB)
+        v_sfunc = _vsize(SCALAR_FUNC_CLASS)
 
         emb = hidden_dim // 4
         half = max(1, emb // 2)
@@ -82,6 +84,7 @@ class GroupPrototypeClassifier(nn.Module):
         self.emb_pah = nn.Embedding(v_pah, half)
         self.emb_metric = nn.Embedding(v_metric, half)   # M4: index-space metric
         self.emb_pdim = nn.Embedding(v_pdim, half)        # v3.1: discrete dim
+        self.emb_sfunc = nn.Embedding(v_sfunc, half)      # HS1.0: potential class
 
         # Lookup table raw IndexSpace dim → PRIMARY_DIM_VOCAB index. Buffer so
         # it rides along with .to(device) / state_dict.
@@ -92,9 +95,10 @@ class GroupPrototypeClassifier(nn.Module):
         self.register_buffer("_dim_lut", lut)
         self._max_dim = max_dim
 
-        # rank scalar (+1) + 7 half-embeddings (stat, psh, pah, metric, pdim,
-        # and v3.3 secondary metric + secondary pdim for multi-index fields).
-        node_in_dim = emb * 2 + half * 7 + 1
+        # rank scalar (+1) + 8 half-embeddings (stat, psh, pah, metric, pdim,
+        # v3.3 secondary metric + secondary pdim for multi-index fields, and
+        # HS1.0 ScalarFunction potential class).
+        node_in_dim = emb * 2 + half * 8 + 1
         self.node_proj = nn.Linear(node_in_dim, hidden_dim)
 
         self.convs = nn.ModuleList([
@@ -113,9 +117,10 @@ class GroupPrototypeClassifier(nn.Module):
     # ── encoding ────────────────────────────────────────
 
     def encode_nodes(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [N, 10] long
+        # x: [N, 11] long
         # [kind, name, rank, statistics, stats_hint, antisym_hint,
-        #  primary_dim, primary_metric, secondary_dim, secondary_metric]
+        #  primary_dim, primary_metric, secondary_dim, secondary_metric,
+        #  scalar_func_class]
         kind = self.emb_kind(x[:, 0])
         name = self.emb_name(x[:, 1])
         rank = x[:, 2].float().unsqueeze(-1) / 4.0
@@ -135,8 +140,12 @@ class GroupPrototypeClassifier(nn.Module):
         dim_idx2 = self._dim_lut[x[:, 8].long().clamp(0, self._max_dim)]
         secondary_dim = self.emb_pdim(dim_idx2)
         metric2 = self.emb_metric(x[:, 9])
+        # HS1.0: ScalarFunction potential class — lets SO(4) key on a 1/r
+        # (inv_sqrt) potential without leaking onto a generic V(r) node.
+        sfunc = self.emb_sfunc(x[:, 10])
         h = torch.cat([kind, name, rank, stat, psh, pah,
-                       primary_dim, metric, secondary_dim, metric2], dim=-1)
+                       primary_dim, metric, secondary_dim, metric2, sfunc],
+                      dim=-1)
         return self.node_proj(h)
 
     # ── forward ────────────────────────────────────────

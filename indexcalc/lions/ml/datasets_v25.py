@@ -94,6 +94,7 @@ def _encode_to_pyg(g: EncodedGraph, hints: dict, labels: dict,
             antisym_hint=h.get("antisym_hint", "unknown"),
             primary_dim=primary_dim, primary_metric=primary_metric,
             secondary_dim=secondary_dim, secondary_metric=secondary_metric,
+            func_name=getattr(n, "func_name", ""),
         )
         if field_token_remap is not None:
             # Remap the name slot (index 1) through the rename perm.

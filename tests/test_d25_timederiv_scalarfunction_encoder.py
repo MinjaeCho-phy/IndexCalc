@@ -74,7 +74,8 @@ def test_timederiv_emits_operator_and_acts_on(vec_space):
     # Two contraction edges (one per i, j).
     assert len(contract) == 2
     for e in contract:
-        assert e.space == "so3_vec"
+        # v3.4: edge.space is the contraction space's "{dim}:{metric}" token.
+        assert e.space == "3:delta"
 
 
 # ─── graph_encode: ScalarFunction ───────────────────────
@@ -98,7 +99,71 @@ def test_scalarfunction_emits_operator_and_acts_on(vec_space):
     # Inner contraction edges still emitted.
     contract = [e for e in g.edges if e.kind == "contraction"]
     assert len(contract) == 2
-    assert all(e.space == "so3_vec" for e in contract)
+    assert all(e.space == "3:delta" for e in contract)  # v3.4 (dim,metric) token
+
+
+# ─── HS1.0: ScalarFunction carries its potential class ──
+
+
+def test_scalarfunction_node_carries_func_name(vec_space):
+    """The ScalarFunction graph node records its function name (HS1.0)."""
+    Phi_k = _phi(vec_space, "k")
+    Phi_l = _phi(vec_space, "l")
+    r_sq = _delta(vec_space, "k", "l") * Phi_k * Phi_l
+    g = graph_encode(ScalarFunction("inv_sqrt", r_sq))
+    sf = [n for n in g.nodes if n.name == "ScalarFunction"]
+    assert len(sf) == 1
+    assert sf[0].func_name == "inv_sqrt"
+
+
+def test_potential_class_distinguishes_shapes():
+    """1/r and a generic potential map to *different* feature ids — the whole
+    point of HS1.0: SO(4) must key on inv_sqrt, not on any ScalarFunction."""
+    from indexcalc.lions.ml.features_v25 import (
+        node_feature_ids_v25, scalar_func_class_id,
+    )
+    assert scalar_func_class_id("inv_sqrt") == 2
+    assert scalar_func_class_id("weird_pot") == 1   # generic fallback
+    assert scalar_func_class_id("") == 0            # not a ScalarFunction
+
+    f_kepler = node_feature_ids_v25(
+        "operator", "ScalarFunction", 0, "bosonic", func_name="inv_sqrt")
+    f_generic = node_feature_ids_v25(
+        "operator", "ScalarFunction", 0, "bosonic", func_name="weird_pot")
+    assert len(f_kepler) == 11 and len(f_generic) == 11
+    # Identical everywhere except the potential-class slot (index 10).
+    assert f_kepler[:10] == f_generic[:10]
+    assert f_kepler[10] != f_generic[10]
+
+
+def test_pyg_encoding_separates_kepler_from_generic_potential(tmp_path, vec_space):
+    """Two Lagrangians identical but for the ScalarFunction name encode to
+    *different* node-feature tensors (so the model can learn the split)."""
+    import json
+    from indexcalc.lions.serializer import (
+        expr_to_dict, collect_spaces, space_to_dict,
+    )
+    from indexcalc.lions.ml.datasets_v25 import LionsV25Dataset
+
+    def _make(name):
+        Phi_k = _phi(vec_space, "k")
+        Phi_l = _phi(vec_space, "l")
+        r_sq = _delta(vec_space, "k", "l") * Phi_k * Phi_l
+        L = ScalarFunction(name, r_sq)
+        spaces = collect_spaces(L)
+        p = tmp_path / f"{name}.json"
+        p.write_text(json.dumps({
+            "schema_version": "v2.5-catalog",
+            "spaces": {nm: space_to_dict(sp) for nm, sp in spaces.items()},
+            "rows": [{"expr": expr_to_dict(L), "primary": "SO(3)",
+                      "labels": {}, "field_properties": {}, "provenance": "t"}],
+        }))
+        return LionsV25Dataset(p)[0].x
+
+    x_kepler = _make("inv_sqrt")
+    x_generic = _make("inverse")
+    assert x_kepler.shape == x_generic.shape
+    assert not bool((x_kepler == x_generic).all())
 
 
 # ─── Kepler L composite ────────────────────────────────
