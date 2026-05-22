@@ -110,6 +110,11 @@ def is_total_time_derivative(
     the caller — searching them is the learnable step in Direction C.
     """
     fields = frozenset(field_names)
+    # ``apply_generator`` leaves the variation of a velocity in the form
+    # ∂_t(δφ) (e.g. δẋ = ∂_t(δx) for a velocity-dependent δx). Expand those ∂_t
+    # by the same Leibniz rule used on the boundary term, so both sides of the
+    # comparison are in one fully-distributed form (identity-preserving rewrite).
+    delta_L = dt_expand(delta_L, fields)
     if _is_zero(delta_L):                       # δL = 0 exactly (internal sym)
         return True, None
     for F in (candidates or []):

@@ -15,7 +15,7 @@ from indexcalc.core.scalar_function import ScalarFunction
 from indexcalc.core.group import Group
 from indexcalc.core.generator import (
     Generator, make_o_n_generator, make_sp_2n_generator,
-    lorentz_vector_action, u1_action,
+    lorentz_vector_action, u1_action, _fresh_dummy_name,
 )
 from indexcalc.core.substitution import apply_generator
 from indexcalc.core.variation import ZeroTensor
@@ -227,6 +227,81 @@ def test_nonorthogonal_action_does_not_cancel_delta_bilinear():
     gen.declare_action("vector", lorentz_vector_action(VEC, cometric_antisym=False))
     res = verify_symmetry(_mass(), gen, field_names={"Phi"})
     assert not res.is_symmetry
+
+
+# ─── LRL: hidden SO(4) boost verified off-shell ─────────
+
+_P = "p"   # LRL parameter direction (a vector index the Kepler L never uses)
+
+
+def _delta_up(a, b):
+    return Tensor("delta", [VEC.upper(a), VEC.upper(b)], symmetric_pairs=[(0, 1)])
+
+
+def _x_dot_x():
+    """δ_kl Φ^k Φ̇^l  (scalar x·ẋ), fresh dummies each call."""
+    k, l = _fresh_dummy_name(), _fresh_dummy_name()
+    return _delta(k, l) * _phi(k) * TimeDeriv(_phi(l))
+
+
+def _lrl_action(field):
+    """δΦ^i = 2 Φ̇^i Φ^p − Φ^i Φ̇^p − (x·ẋ) δ^{ip}."""
+    i = field.indices[0].name
+    t1 = ScalarMul(2.0, TimeDeriv(_phi(i)) * _phi(_P))
+    t2 = ScalarMul(-1.0, field * TimeDeriv(_phi(_P)))
+    t3 = ScalarMul(-1.0, _x_dot_x() * _delta_up(i, _P))
+    return TensorSum(TensorSum(t1, t2), t3)
+
+
+def _lrl_F():
+    """F^p = (ẋ·ẋ) Φ^p − (x·ẋ) Φ̇^p + Φ^p / r."""
+    k, l = _fresh_dummy_name(), _fresh_dummy_name()
+    xdot2 = _delta(k, l) * TimeDeriv(_phi(k)) * TimeDeriv(_phi(l))
+    F1 = xdot2 * _phi(_P)
+    F2 = ScalarMul(-1.0, _x_dot_x() * TimeDeriv(_phi(_P)))
+    F3 = _phi(_P) * ScalarFunction("inv_sqrt", _r2())
+    return TensorSum(TensorSum(F1, F2), F3)
+
+
+def test_kepler_lrl_boost_verifies_offshell():
+    """Hidden SO(4): the velocity-dependent LRL boost
+    δΦ^i = 2Φ̇^i Φ^p − Φ^i Φ̇^p − (x·ẋ)δ^{ip} is a Noether symmetry of the full
+    Kepler L (incl. the 1/r ScalarFunction), with δL = d/dt F^p — verified
+    *off-shell* (no EOM). Closes the LRL sector of Kepler's hidden SO(4): the
+    C0b gate. Exercises the LRL backend lifts (free-index metric absorption,
+    mixed-Kronecker elimination, inv_sqrt homogeneity)."""
+    gen = Generator("LRL", _group())
+    gen.declare_action("vector", _lrl_action)
+    gen.declare_action("singlet", lambda f: ZeroTensor(f.free_indices))
+    res = verify_symmetry(_kepler(), gen, field_names={"Phi"},
+                          boundary_candidates=[_lrl_F()])
+    assert res.is_symmetry and not res.exact      # δL = d/dt F (F ≠ 0)
+    assert res.boundary_term is not None
+
+
+def test_lrl_wrong_coefficient_is_not_a_symmetry():
+    """Soundness: corrupt the LRL ansatz (coefficient 1 instead of 2 on the
+    first term) — verify_symmetry must reject it (δL ≠ d/dt F^p)."""
+    def bad_action(field):
+        i = field.indices[0].name
+        t1 = ScalarMul(1.0, TimeDeriv(_phi(i)) * _phi(_P))   # should be 2.0
+        t2 = ScalarMul(-1.0, field * TimeDeriv(_phi(_P)))
+        t3 = ScalarMul(-1.0, _x_dot_x() * _delta_up(i, _P))
+        return TensorSum(TensorSum(t1, t2), t3)
+    gen = Generator("LRLbad", _group())
+    gen.declare_action("vector", bad_action)
+    gen.declare_action("singlet", lambda f: ZeroTensor(f.free_indices))
+    res = verify_symmetry(_kepler(), gen, field_names={"Phi"},
+                          boundary_candidates=[_lrl_F()])
+    assert not res.is_symmetry
+
+
+def test_simplify_eliminates_mixed_kronecker():
+    """δ^p{}_j Φ^j → Φ^p  (mixed-position Kronecker is the identity map)."""
+    kron = Tensor("delta", [VEC.upper(_P), VEC.lower("j")])
+    out = simplify(kron * _phi("j"))
+    assert isinstance(out, Tensor) and out.name == "Phi"
+    assert [idx.name for idx in out.free_indices] == [_P]
 
 
 def test_is_total_time_derivative_zero_case():

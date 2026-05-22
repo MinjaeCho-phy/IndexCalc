@@ -1551,6 +1551,59 @@ def _split_scalar(expr: TensorExpr) -> tuple:
     return 1, expr
 
 
+# A homogeneous ScalarFunction f(I) = I^deg satisfies I·f'(I) = deg·f(I).
+# inv_sqrt(I) = I^{-1/2} (= 1/r for I = r²) — its degree −½ is *why* the Kepler
+# 1/r potential has the hidden SO(4) (the LRL boost is a symmetry only because
+# of this homogeneity).
+_SCALARFUNC_DEGREE = {"inv_sqrt": -0.5}
+
+
+def apply_scalar_homogeneity(expr: TensorExpr) -> TensorExpr:
+    """Collapse ``f'(I)·I → deg·f(I)`` for a homogeneous ScalarFunction.
+
+    When a product carries ``f_prime(I)`` *and* a cofactor sub-product equal to
+    its argument ``I`` (a scalar), replace the pair by ``deg·f(I)`` (keeping the
+    remaining factors). Sound: it is the Euler identity for f(I)=I^deg. Detect
+    via canonical comparison after ``simplify`` (so δ_kl Φ^k Φ^l matches an
+    already-absorbed Φ_l Φ^l)."""
+    if isinstance(expr, TensorSum):
+        new_l = apply_scalar_homogeneity(expr.left)
+        new_r = apply_scalar_homogeneity(expr.right)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+    if isinstance(expr, ScalarMul):
+        new_inner = apply_scalar_homogeneity(expr.expr)
+        if new_inner is not expr.expr:
+            return ScalarMul(expr.scalar, new_inner)
+        return expr
+    if not isinstance(expr, TensorProduct):
+        return expr
+
+    from indexcalc.core.scalar_function import ScalarFunction
+    factors = collect_factors(expr)
+    for k, S in enumerate(factors):
+        if not isinstance(S, ScalarFunction) or not S.name.endswith("_prime"):
+            continue
+        base = S.name[: -len("_prime")]
+        if base not in _SCALARFUNC_DEGREE:
+            continue
+        deg = _SCALARFUNC_DEGREE[base]
+        arg_key = canonical_form_modulo_dummies(simplify(S.arg))
+        other = [f for i, f in enumerate(factors) if i != k]
+        for r in range(1, len(other) + 1):
+            for combo in _itertools_clifford.combinations(range(len(other)), r):
+                sub = _product_of_factors([other[i] for i in combo])
+                if sub.free_indices:
+                    continue                     # I is a scalar
+                if canonical_form_modulo_dummies(simplify(sub)) != arg_key:
+                    continue
+                rest = [other[i] for i in range(len(other)) if i not in combo]
+                repl = ScalarMul(float(deg), ScalarFunction(base, S.arg))
+                return _product_of_factors([repl] + rest)
+    return expr
+
+
 def collect_scalar_terms(expr: TensorExpr) -> TensorExpr:
     """``TensorSum`` 안에서 동일 canonical body의 summand를 묶어 scalar 합산.
 
@@ -1862,6 +1915,32 @@ def _rebuild_with_renamed_slot(
     )
 
 
+def _rebuild_renaming_index(
+    F: TensorExpr, old_name: str, new_name: str, new_position: str,
+) -> TensorExpr | None:
+    """Rename index ``old_name`` → (``new_name``, ``new_position``) wherever it
+    sits, descending ∂_t / ∂_μ wrappers. Returns the rebuilt expr, or ``None``
+    if ``old_name`` is not found. Mirrors ``_find_slot_with_name``'s descent so
+    a metric can be absorbed into a field wrapped in a derivative."""
+    if isinstance(F, Tensor):
+        for s, idx in enumerate(F.indices):
+            if idx.name == old_name:
+                return _rebuild_with_renamed_slot(F, s, new_name, new_position)
+        return None
+    if isinstance(F, (PartialDeriv, CovariantDeriv)):
+        inner = _rebuild_renaming_index(F.expr, old_name, new_name, new_position)
+        if inner is None:
+            return None
+        if isinstance(F, PartialDeriv):
+            return PartialDeriv(inner, F.deriv_index)
+        return CovariantDeriv(inner, F.deriv_index, F.connections)
+    from indexcalc.adm import TimeDeriv
+    if isinstance(F, TimeDeriv):
+        inner = _rebuild_renaming_index(F.expr, old_name, new_name, new_position)
+        return TimeDeriv(inner) if inner is not None else None
+    return None
+
+
 def absorb_einstein_metric(expr: TensorExpr, mreg=None) -> TensorExpr:
     """metric η^{αβ} 또는 η_{αβ}를 흡수해 host 텐서 슬롯을 raise/lower.
 
@@ -1957,6 +2036,124 @@ def absorb_einstein_metric(expr: TensorExpr, mreg=None) -> TensorExpr:
             new_list.append(F_a_new if i == j_a else f)
         return _product_of_factors(new_list)
 
+    return expr
+
+
+def absorb_metric_free_index(expr: TensorExpr, mreg=None) -> TensorExpr:
+    """metric δ_{jp} with one **free** index relabels a contracted host:
+    ``δ_{jp} V^j = V_p`` (j dummy contracting host V, p a free index that simply
+    lowers onto V). Complements ``absorb_einstein_metric`` (which needs *both*
+    indices to be dummies). The host may be wrapped in ∂_t / ∂_μ.
+
+    Arises in velocity-dependent variations such as the Kepler LRL transform,
+    where δx carries a term ∝ δ^{ip} with p the free symmetry parameter.
+    """
+    if isinstance(expr, TensorSum):
+        new_l = absorb_metric_free_index(expr.left, mreg)
+        new_r = absorb_metric_free_index(expr.right, mreg)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+    if isinstance(expr, ScalarMul):
+        new_inner = absorb_metric_free_index(expr.expr, mreg)
+        if new_inner is not expr.expr:
+            return ScalarMul(expr.scalar, new_inner)
+        return expr
+    if not isinstance(expr, TensorProduct):
+        return expr
+
+    factors = collect_factors(expr)
+    name_counts = _index_name_count(factors)
+    free_names = {idx.name for idx in expr.free_indices}
+
+    for k, M in enumerate(factors):
+        if not _is_metric_factor_for_absorption(M, mreg):
+            continue
+        n_0, n_1 = M.indices[0].name, M.indices[1].name
+        if n_0 == n_1:
+            continue
+        new_pos = M.indices[0].position
+        # one index a dummy (count 2, hosted), the other a free index (count 1).
+        for dummy, free in ((n_0, n_1), (n_1, n_0)):
+            if dummy in free_names or name_counts.get(dummy, 0) != 2:
+                continue
+            if free not in free_names or name_counts.get(free, 0) != 1:
+                continue
+            for j, F in enumerate(factors):
+                if j == k:
+                    continue
+                if _find_slot_with_name(F, dummy) is None:
+                    continue
+                F_new = _rebuild_renaming_index(F, dummy, free, new_pos)
+                if F_new is None:
+                    continue
+                new_list = [
+                    (F_new if i == j else f)
+                    for i, f in enumerate(factors) if i != k
+                ]
+                return _product_of_factors(new_list)
+    return expr
+
+
+def eliminate_kronecker(expr: TensorExpr, mreg=None) -> TensorExpr:
+    """Mixed-position Kronecker δ^a{}_b (the identity map) substitutes a
+    contracted index: ``δ^a{}_b X^b → X^a`` (host may be ∂-wrapped). Always
+    sound — δ^a{}_b is the identity — and complements the *same*-position
+    metric absorptions above. Arises when a metric meets an inverse metric,
+    e.g. δ_{ij} δ^{ip} → δ_j{}^p in the Kepler LRL variation.
+    """
+    if isinstance(expr, TensorSum):
+        new_l = eliminate_kronecker(expr.left, mreg)
+        new_r = eliminate_kronecker(expr.right, mreg)
+        if new_l is not expr.left or new_r is not expr.right:
+            return TensorSum(new_l, new_r)
+        return expr
+    if isinstance(expr, ScalarMul):
+        new_inner = eliminate_kronecker(expr.expr, mreg)
+        if new_inner is not expr.expr:
+            return ScalarMul(expr.scalar, new_inner)
+        return expr
+    if not isinstance(expr, TensorProduct):
+        return expr
+
+    factors = collect_factors(expr)
+    name_counts = _index_name_count(factors)
+    free_names = {idx.name for idx in expr.free_indices}
+
+    for k, M in enumerate(factors):
+        if not isinstance(M, Tensor) or len(M.indices) != 2:
+            continue
+        if M.name not in ("delta", "eta"):
+            continue
+        if any(r != "singlet" for r in M.reps.values()):
+            continue
+        i0, i1 = M.indices
+        if i0.position == i1.position:
+            continue                       # same-position → metric absorption path
+        if i0.space != i1.space:
+            continue
+        if i0.name == i1.name:
+            continue                       # self-trace δ^a{}_a = dim (deferred)
+        # One index is a dummy contracting a host; the other becomes its label.
+        for dummy, keep, keep_pos in (
+            (i0.name, i1.name, i1.position),
+            (i1.name, i0.name, i0.position),
+        ):
+            if dummy in free_names or name_counts.get(dummy, 0) != 2:
+                continue
+            for j, F in enumerate(factors):
+                if j == k:
+                    continue
+                if _find_slot_with_name(F, dummy) is None:
+                    continue
+                F_new = _rebuild_renaming_index(F, dummy, keep, keep_pos)
+                if F_new is None:
+                    continue
+                new_list = [
+                    (F_new if i == j else f)
+                    for i, f in enumerate(factors) if i != k
+                ]
+                return _product_of_factors(new_list)
     return expr
 
 
@@ -2199,6 +2396,8 @@ def simplify(expr: TensorExpr, mreg=None) -> TensorExpr:
         cur = distribute_products(cur)
         cur = pull_scalars(cur)
         cur = absorb_einstein_metric(cur, mreg)
+        cur = absorb_metric_free_index(cur, mreg)
+        cur = eliminate_kronecker(cur, mreg)
         cur = promote_cometric_antisym(cur)
         cur = commute_partial_through_constants(cur)
         cur = apply_clifford_sigma_gamma(cur)
@@ -2206,6 +2405,7 @@ def simplify(expr: TensorExpr, mreg=None) -> TensorExpr:
         cur = apply_sigma_projector_commute(cur)
         cur = apply_chiral_projector_identities(cur)
         cur = apply_epsilon_su_n_invariance(cur)
+        cur = apply_scalar_homogeneity(cur)
         cur = collect_scalar_terms(cur)
         cur = is_zero_by_antisym_term_cancellation(cur)
         cur = is_zero_by_invariant_topform_variation(cur)
