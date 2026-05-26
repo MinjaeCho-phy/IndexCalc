@@ -18,6 +18,7 @@ Simplify: 표현식 정규화 및 동등성 검사 기본기.
 """
 
 from __future__ import annotations
+import itertools
 from typing import Sequence
 
 from indexcalc.core.index import Index, IndexSpace
@@ -162,10 +163,19 @@ def _factor_key_no_swap(factor: TensorExpr, swap_names: Sequence[str]) -> tuple:
             _factor_key_no_swap(factor.expr, swap_names),
         )
     if isinstance(factor, PartialDeriv):
+        # Partial derivatives commute (∂_μ∂_ν = ∂_ν∂_μ): collect the whole stack
+        # of consecutive PartialDerivs and sort their index keys so the nesting
+        # order is canonical. Lets ∂_m∂_r(φ) and ∂_r∂_m(φ) cancel. (CovariantDeriv
+        # does NOT commute — its branch below keeps the order, no sort.)
+        idx_keys = []
+        cur: TensorExpr = factor
+        while isinstance(cur, PartialDeriv):
+            idx_keys.append(_index_key(cur.deriv_index, swap_names))
+            cur = cur.expr
         return (
             "PartialDeriv",
-            _index_key(factor.deriv_index, swap_names),
-            _factor_key_no_swap(factor.expr, swap_names),
+            tuple(sorted(idx_keys)),
+            _factor_key_no_swap(cur, swap_names),
         )
     from indexcalc.adm import TimeDeriv
     if isinstance(factor, TimeDeriv):
@@ -246,9 +256,49 @@ def canonical_form_modulo_dummies(expr: TensorExpr) -> tuple:
 
     NOT used by ``is_zero_by_antisym_swap`` — 거기선 free renaming이 false positive
     (X·Y 류)를 일으키므로 strict ``canonical_form``을 유지.
+
+    Dummy 인덱스는 contract(합산)되므로 *어떤 일관된 relabeling도 같은 텐서*다.
+    등장순서 heuristic(``_dummy_canonical_factors``)은 대칭 구조(symmetric tensor
+    + ∂∂ stack가 dummy를 공유하는 경우)에서 두 동등 항에 다른 라벨을 부여해
+    cancellation을 놓친다. 진짜 canonical form = **모든 dummy relabeling에 대한
+    최소 key**. dummy 수 k가 작으면(≤6) k! brute-force로 정확히 계산한다.
+    (Tensor.symmetric_pairs·∂∂ stack 키 정렬과 결합하면 겹치는 대칭도 해소.)
     """
-    renamed = _dummy_canonical_factors(expr)
-    return tuple(sorted(_factor_key_no_swap(f, ()) for f in renamed))
+    factors = collect_factors(expr)
+    name_counts = _index_name_count(factors)
+    free_names = {idx.name for idx in expr.free_indices}
+    dummy_names = sorted(
+        n for n, c in name_counts.items() if c == 2 and n not in free_names
+    )
+
+    def _has_deriv_dummy_stack(fs) -> bool:
+        """∂∂ stack(depth≥2)에 dummy deriv 인덱스가 ≥2개 — 편미분 교환 대칭이
+        dummy를 공유해 등장순서 라벨링이 모호해지는 유일한 경우."""
+        for f in fs:
+            cur, n = f, 0
+            while isinstance(cur, PartialDeriv):
+                if cur.deriv_index.name in dummy_names:
+                    n += 1
+                cur = cur.expr
+            if n >= 2:
+                return True
+        return False
+
+    # 등장순서 heuristic은 1차식엔 충분(기존 733 테스트가 입증). 2차 미분 stack이
+    # dummy를 공유할 때만 brute-force min over relabeling (정확하지만 k! 비용).
+    if (not dummy_names or len(dummy_names) > 6
+            or not _has_deriv_dummy_stack(factors)):
+        renamed = _dummy_canonical_factors(expr)
+        return tuple(sorted(_factor_key_no_swap(f, ()) for f in renamed))
+    targets = [f"_d{i}" for i in range(len(dummy_names))]
+    best: tuple | None = None
+    for perm in itertools.permutations(targets):
+        mapping = dict(zip(dummy_names, perm))
+        renamed = [rename_index(f, mapping) for f in factors]
+        key = tuple(sorted(_factor_key_no_swap(f, ()) for f in renamed))
+        if best is None or key < best:
+            best = key
+    return best
 
 
 def _dummy_canonical_factors(expr: TensorExpr) -> list[TensorExpr]:

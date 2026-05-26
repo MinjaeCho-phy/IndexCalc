@@ -22,8 +22,9 @@ from indexcalc.core.variation import ZeroTensor
 from indexcalc.core.simplify import simplify, collect_factors
 from indexcalc.adm import TimeDeriv
 from indexcalc.core.noether import (
-    dt_expand, is_total_time_derivative, verify_symmetry,
+    dt_expand, is_total_time_derivative, verify_symmetry, verify_symmetry_ft,
 )
+from indexcalc.core.deriv import PartialDeriv
 
 
 VEC = IndexSpace("q3", dim=3, indices="ijklmn", metric="delta")
@@ -319,3 +320,58 @@ def test_simplify_distinguishes_timederiv_order():
     ddot = TimeDeriv(TimeDeriv(_phi("i")))
     diff = TensorSum(dot, ScalarMul(-1.0, ddot))
     assert not isinstance(simplify(diff), ZeroTensor)
+
+
+# ─── (C) Field-theory ∂_μ Noether: δL = ∂_μ J^μ (total divergence) ─────
+
+_ST = IndexSpace("st", dim=4, indices="mnpqrsuvw", metric="eta")
+_TR = Group("Tr", dim=4, abelian=False)
+_TR.add_rep("scalar", dim=1)
+_SPHI = Tensor("phi", [], reps={"Tr": "scalar"})
+
+
+def _scalar_kinetic(d1, d2):
+    """−½ η^{d1 d2} ∂_{d1}φ ∂_{d2}φ (massless free scalar)."""
+    eta_inv = Tensor("eta", [_ST.upper(d1), _ST.upper(d2)], symmetric_pairs=[(0, 1)])
+    return ScalarMul(-0.5, eta_inv * PartialDeriv(_SPHI, _ST.lower(d1))
+                     * PartialDeriv(_SPHI, _ST.lower(d2)))
+
+
+def _translation_action(field):
+    """δφ = a^r ∂_r φ — spacetime translation (a constant, fresh dummy)."""
+    r = _fresh_dummy_name()
+    return Tensor("a", [_ST.upper(r)]) * PartialDeriv(field, _ST.lower(r))
+
+
+def test_scalar_translation_is_total_divergence():
+    """Free scalar spacetime translation δφ=a^ν∂_νφ → δL = ∂_μ(a^μ L), the
+    field-theory analogue of time translation. Exercises the ∂_μ verifier
+    (verify_symmetry_ft) and the two simplify lifts it needs: partial-derivative
+    commutativity (∂_μ∂_ν=∂_ν∂_μ) and dummy canonicalization over the resulting
+    symmetric second-derivative stack."""
+    gen = Generator("transl", _TR)
+    gen.declare_action("scalar", _translation_action)
+    L = _scalar_kinetic("m", "n")
+    J = Tensor("a", [_ST.upper("p")]) * _scalar_kinetic("u", "v")    # J^p = a^p L
+    res = verify_symmetry_ft(L, gen, field_names={"phi"},
+                             deriv_index=_ST.lower("p"), current_candidates=[J])
+    assert res.is_symmetry and not res.exact
+    assert res.boundary_term is not None
+
+
+def test_scalar_translation_wrong_current_rejected():
+    """Soundness: a wrong current (coefficient 2 instead of 1) must not verify."""
+    gen = Generator("transl", _TR)
+    gen.declare_action("scalar", _translation_action)
+    L = _scalar_kinetic("m", "n")
+    bad_J = ScalarMul(2.0, Tensor("a", [_ST.upper("p")]) * _scalar_kinetic("u", "v"))
+    res = verify_symmetry_ft(L, gen, field_names={"phi"},
+                             deriv_index=_ST.lower("p"), current_candidates=[bad_J])
+    assert not res.is_symmetry
+
+
+def test_partial_derivatives_commute_in_simplify():
+    """∂_m∂_r(φ) − ∂_r∂_m(φ) = 0 (partial derivatives commute)."""
+    a = PartialDeriv(PartialDeriv(_SPHI, _ST.lower("r")), _ST.lower("m"))
+    b = PartialDeriv(PartialDeriv(_SPHI, _ST.lower("m")), _ST.lower("r"))
+    assert isinstance(simplify(TensorSum(a, ScalarMul(-1.0, b))), ZeroTensor)

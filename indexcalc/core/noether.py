@@ -124,6 +124,86 @@ def is_total_time_derivative(
     return False, None
 
 
+# ─── Field-theory (∂_μ) Noether: δL = ∂_μ J^μ (total divergence) ──────
+# Mirror of the 1D ∂_t verifier above, lifted to full spacetime: a symmetry of
+# a field-theory Lagrangian leaves L invariant up to a total *divergence*
+# ∂_μ J^μ (not just a total time derivative). Same Leibniz/constant-leaf/chain
+# rule logic, with PartialDeriv carrying the derivative index μ.
+
+def _push_div(inner: TensorExpr, field_names: frozenset[str],
+              mu: "Index") -> TensorExpr:
+    """Apply one ∂_μ to an (already div-expanded) expression, Leibniz."""
+    from indexcalc.core.deriv import PartialDeriv
+    if isinstance(inner, ScalarMul):
+        return ScalarMul(inner.scalar, _push_div(inner.expr, field_names, mu))
+    if isinstance(inner, TensorSum):
+        return TensorSum(_push_div(inner.left, field_names, mu),
+                         _push_div(inner.right, field_names, mu))
+    if isinstance(inner, TensorProduct):
+        return TensorSum(
+            _push_div(inner.left, field_names, mu) * inner.right,
+            inner.left * _push_div(inner.right, field_names, mu),
+        )
+    if isinstance(inner, ScalarFunction):
+        d_arg = _push_div(inner.arg, field_names, mu)
+        if isinstance(d_arg, ZeroTensor):
+            return ZeroTensor([mu])
+        return TensorProduct(ScalarFunction(f"{inner.name}_prime", inner.arg), d_arg)
+    if isinstance(inner, Tensor) and _is_constant_leaf(inner, field_names):
+        return ZeroTensor(PartialDeriv(inner, mu).free_indices)
+    # dynamical field leaf, or an existing PartialDeriv(...) → one more ∂_μ.
+    return PartialDeriv(inner, mu)
+
+
+def div_expand(expr: TensorExpr, field_names: Iterable[str]) -> TensorExpr:
+    """Rewrite ``expr`` pushing every ∂_μ inward via Leibniz (spacetime).
+
+    Field-theory analogue of ``dt_expand``: ∂_μ of a non-field leaf (metric,
+    invariant tensor, coupling, constant translation vector) is zero; the
+    ScalarFunction chain rule carries f'(I)∂_μI. Leaves the result in the same
+    fully-distributed form ``apply_generator`` produces so the two compare by
+    ``simplify``.
+    """
+    from indexcalc.core.deriv import PartialDeriv
+    fields = frozenset(field_names)
+    if isinstance(expr, PartialDeriv):
+        return _push_div(div_expand(expr.expr, fields), fields, expr.deriv_index)
+    if isinstance(expr, TensorSum):
+        return TensorSum(div_expand(expr.left, fields), div_expand(expr.right, fields))
+    if isinstance(expr, TensorProduct):
+        return div_expand(expr.left, fields) * div_expand(expr.right, fields)
+    if isinstance(expr, ScalarMul):
+        return ScalarMul(expr.scalar, div_expand(expr.expr, fields))
+    if isinstance(expr, ScalarFunction):
+        return ScalarFunction(expr.name, div_expand(expr.arg, fields))
+    return expr
+
+
+def is_total_divergence(
+    delta_L: TensorExpr,
+    field_names: Iterable[str],
+    deriv_index: "Index",
+    candidates: Optional[Iterable[TensorExpr]] = None,
+) -> tuple[bool, Optional[TensorExpr]]:
+    """Is ``delta_L = ∂_μ J^μ`` for J=0 or one of ``candidates``?
+
+    ``deriv_index`` is the lower index μ that contracts each candidate current's
+    free upper index (so ``∂_μ J^μ`` is a scalar). Searching the candidate
+    currents is the learnable step (Direction C), now in spacetime.
+    """
+    from indexcalc.core.deriv import PartialDeriv
+    fields = frozenset(field_names)
+    delta_L = div_expand(delta_L, fields)
+    if _is_zero(delta_L):                       # δL = 0 exactly (internal sym)
+        return True, None
+    for J in (candidates or []):
+        div_J = div_expand(PartialDeriv(J, deriv_index), fields)
+        residual = TensorSum(delta_L, ScalarMul(-1.0, div_J))
+        if _is_zero(residual):
+            return True, J
+    return False, None
+
+
 @dataclass
 class SymmetryResult:
     is_symmetry: bool
@@ -148,3 +228,23 @@ def verify_symmetry(
     ok, F = is_total_time_derivative(delta_L, field_names, boundary_candidates)
     return SymmetryResult(is_symmetry=ok, exact=(ok and F is None),
                           boundary_term=F, delta_L=delta_L)
+
+
+def verify_symmetry_ft(
+    lagrangian: TensorExpr,
+    generator: Generator,
+    field_names: Iterable[str],
+    deriv_index: "Index",
+    current_candidates: Optional[Iterable[TensorExpr]] = None,
+) -> SymmetryResult:
+    """Field-theory (∂_μ) symmetry check: ``δL = ∂_μ J^μ`` (total divergence).
+
+    Spacetime analogue of ``verify_symmetry``. ``generator`` may be a
+    derivative-dependent action (e.g. δφ = a^ν ∂_ν φ for spacetime translation);
+    ``apply_generator`` already lifts ∂_μ through it. ``deriv_index`` is the
+    lower index contracting each candidate current's free upper index.
+    """
+    delta_L = apply_generator(lagrangian, generator)
+    ok, J = is_total_divergence(delta_L, field_names, deriv_index, current_candidates)
+    return SymmetryResult(is_symmetry=ok, exact=(ok and J is None),
+                          boundary_term=J, delta_L=delta_L)
