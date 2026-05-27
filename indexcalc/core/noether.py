@@ -149,6 +149,11 @@ def _push_div(inner: TensorExpr, field_names: frozenset[str],
         if isinstance(d_arg, ZeroTensor):
             return ZeroTensor([mu])
         return TensorProduct(ScalarFunction(f"{inner.name}_prime", inner.arg), d_arg)
+    if isinstance(inner, Tensor) and getattr(inner, "is_coordinate", False):
+        # ∂_μ x^ν = δ^ν_μ — 비-field leaf의 ∂=0 규칙의 유일한 예외(좌표).
+        # eliminate_kronecker 가 δ^ν_μ X^μ → X^ν / 자기수축 δ^μ_μ=dim 을 처리.
+        nu = inner.indices[0]
+        return Tensor("delta", [nu, mu], reps={})
     if isinstance(inner, Tensor) and _is_constant_leaf(inner, field_names):
         return ZeroTensor(PartialDeriv(inner, mu).free_indices)
     # dynamical field leaf, or an existing PartialDeriv(...) → one more ∂_μ.

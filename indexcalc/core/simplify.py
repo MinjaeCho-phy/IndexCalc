@@ -2183,7 +2183,15 @@ def eliminate_kronecker(expr: TensorExpr, mreg=None) -> TensorExpr:
         if i0.space != i1.space:
             continue
         if i0.name == i1.name:
-            continue                       # self-trace δ^a{}_a = dim (deferred)
+            # self-trace δ^a{}_a = dim (mixed position, same metric space). Sound:
+            # the Kronecker is the identity map and its trace is the dimension.
+            # Arises as ∂_μ x^μ = δ^μ{}_μ = D in the dilatation current's divergence.
+            if name_counts.get(i0.name, 0) == 2 and i0.name not in free_names:
+                rest = [f for i, f in enumerate(factors) if i != k]
+                if rest:
+                    return ScalarMul(float(i0.space.dim),
+                                     _product_of_factors(rest))
+            continue
         # One index is a dummy contracting a host; the other becomes its label.
         for dummy, keep, keep_pos in (
             (i0.name, i1.name, i1.position),

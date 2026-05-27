@@ -22,7 +22,8 @@ from indexcalc.core.variation import ZeroTensor
 from indexcalc.core.simplify import simplify, collect_factors
 from indexcalc.adm import TimeDeriv
 from indexcalc.core.noether import (
-    dt_expand, is_total_time_derivative, verify_symmetry, verify_symmetry_ft,
+    div_expand, dt_expand, is_total_time_derivative, verify_symmetry,
+    verify_symmetry_ft,
 )
 from indexcalc.core.deriv import PartialDeriv
 
@@ -375,3 +376,65 @@ def test_partial_derivatives_commute_in_simplify():
     a = PartialDeriv(PartialDeriv(_SPHI, _ST.lower("r")), _ST.lower("m"))
     b = PartialDeriv(PartialDeriv(_SPHI, _ST.lower("m")), _ST.lower("r"))
     assert isinstance(simplify(TensorSum(a, ScalarMul(-1.0, b))), ZeroTensor)
+
+
+# ─── coordinate primitive x^μ + dilatation (conformal SO(4,2)) ─────
+# Anonymous discovery (LIONS scripts/discover_spacetime.py) finds the free
+# massless scalar's full conformal algebra SO(4,2)=15 from a generic ansatz;
+# these lock in the ∂_μ verifier's abstract confirm for the x-dependent part.
+
+def _coord(idx_name):
+    return Tensor("x", [_ST.upper(idx_name)], is_coordinate=True)
+
+
+def test_coordinate_partial_is_kronecker():
+    """∂_μ x^ν = δ^ν{}_μ — the coordinate is the one non-field leaf whose ∂ is
+    the Kronecker delta, not zero. Lifts the ∂_μ verifier to x-dependent
+    transformations (Lorentz/dilatation/SCT)."""
+    d = div_expand(PartialDeriv(_coord("n"), _ST.lower("m")), {"phi"})
+    assert isinstance(d, Tensor) and d.name == "delta"
+    assert [(i.name, i.position) for i in d.indices] == [("n", "upper"), ("m", "lower")]
+
+
+def test_kronecker_selftrace_is_dimension():
+    """δ^μ{}_μ = dim (trace of the identity map). Needed for ∂_μ x^μ = D in the
+    dilatation current's divergence."""
+    expr = Tensor("delta", [_ST.upper("m"), _ST.lower("m")], reps={}) * _SPHI
+    diff = TensorSum(expr, ScalarMul(-4.0, _SPHI))     # D = 4
+    assert isinstance(simplify(diff), ZeroTensor)
+
+
+def _dilatation_action(field):
+    """δφ = x^ν ∂_νφ + Δφ — scale transformation, Δ=(D−2)/2=1 for D=4."""
+    r = _fresh_dummy_name()
+    return TensorSum(_coord(r) * PartialDeriv(field, _ST.lower(r)),
+                     ScalarMul(1.0, field))
+
+
+def test_scalar_dilatation_is_total_divergence():
+    """Free massless scalar dilatation δφ=(x·∂+Δ)φ → δL = ∂_μ(x^μ L). The first
+    x-dependent symmetry confirmed by the ∂_μ verifier, exercising the coordinate
+    primitive (∂x=δ) and the self-trace δ^μ{}_μ=D."""
+    gen = Generator("dil", _TR)
+    gen.declare_action("scalar", _dilatation_action)
+    L = _scalar_kinetic("m", "n")
+    J = _coord("p") * _scalar_kinetic("u", "v")              # J^p = x^p L
+    res = verify_symmetry_ft(L, gen, field_names={"phi"},
+                             deriv_index=_ST.lower("p"), current_candidates=[J])
+    assert res.is_symmetry and not res.exact
+    assert res.boundary_term is not None
+
+
+def test_scalar_dilatation_wrong_weight_rejected():
+    """Soundness: the conformal weight is fixed (Δ=1 for D=4). δφ=x·∂φ with no
+    rescaling (Δ=0) is not a symmetry of the kinetic current."""
+    def bad_action(field):
+        r = _fresh_dummy_name()
+        return _coord(r) * PartialDeriv(field, _ST.lower(r))     # Δ=0
+    gen = Generator("dil0", _TR)
+    gen.declare_action("scalar", bad_action)
+    L = _scalar_kinetic("m", "n")
+    J = _coord("p") * _scalar_kinetic("u", "v")
+    res = verify_symmetry_ft(L, gen, field_names={"phi"},
+                             deriv_index=_ST.lower("p"), current_candidates=[J])
+    assert not res.is_symmetry

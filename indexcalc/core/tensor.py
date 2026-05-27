@@ -134,9 +134,14 @@ class Tensor(TensorExpr):
         cometric_antisymmetric_pairs: list[tuple[int, int]] | None = None,
         reps: dict[str, str] | None = None,
         statistics: str = "bosonic",
+        is_coordinate: bool = False,
     ):
         self.name = name
         self.indices = tuple(indices)
+        # is_coordinate: 시공간 좌표 x^μ. ∂_ν x^μ = δ^μ_ν (Kronecker) — 일반
+        # 비-field leaf의 ∂=0 과 다른 유일한 예외. noether._push_div 이 처리.
+        # 좌표는 정확히 하나의 upper 인덱스만 (lower 좌표는 η_μν x^ν로 표기).
+        self.is_coordinate = is_coordinate
         # antisymmetric_pairs: 서로 바꾸면 -1 배인 slot 쌍 목록. 예: B_μν = -B_νμ
         # → antisymmetric_pairs=[(0, 1)]
         self.antisymmetric_pairs: tuple[tuple[int, int], ...] = tuple(
@@ -206,6 +211,13 @@ class Tensor(TensorExpr):
                 f"statistics must be 'bosonic' or 'fermionic', got {statistics!r}"
             )
         self.statistics = statistics
+        if self.is_coordinate and not (
+            len(self.indices) == 1 and self.indices[0].position == "upper"
+        ):
+            raise ValueError(
+                "coordinate tensor must carry exactly one upper index "
+                f"(x^μ), got {self.indices}"
+            )
 
     @property
     def free_indices(self) -> list[Index]:
